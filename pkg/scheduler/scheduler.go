@@ -198,6 +198,10 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 	s.attemptCount++
 	log := ctrl.LoggerFrom(ctx).WithValues("attemptCount", s.attemptCount)
 	ctx = ctrl.LoggerInto(ctx, log)
+	log.Info("Starting scheduling cycle")
+	defer func() {
+		log.Info("Finished scheduling cycle")
+	}()
 
 	// 1. Get the heads from the queues, including their desired clusterQueue.
 	// This operation blocks while the queues are empty.
@@ -209,7 +213,7 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 	startTime := time.Now()
 
 	// 2. Take a snapshot of the cache.
-	snapshot := s.cache.Snapshot()
+	snapshot := s.cache.SnapshotWithCtx(ctx)
 	logSnapshotIfVerbose(log, &snapshot)
 
 	// 3. Calculate requirements (resource flavors, borrowing) for admitting workloads.

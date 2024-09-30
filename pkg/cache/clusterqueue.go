@@ -83,6 +83,10 @@ type clusterQueue struct {
 
 	resourceNode ResourceNode
 	hierarchy.ClusterQueue[*cohort]
+
+	// TODO: support referencing two or more TAS ResourceFlavors
+	tasResourceFlavorRef *kueue.ResourceFlavorReference
+	tasCache             *TASCache
 }
 
 func (c *clusterQueue) GetName() string {
@@ -290,7 +294,16 @@ func (c *clusterQueue) inactiveReason() (string, string) {
 // Exported only for testing.
 func (c *clusterQueue) UpdateWithFlavors(flavors map[kueue.ResourceFlavorReference]*kueue.ResourceFlavor) {
 	c.updateLabelKeys(flavors)
+	c.updateTASResourceFlavorRef(flavors)
 	c.updateQueueStatus()
+}
+
+func (cq *clusterQueue) updateTASResourceFlavorRef(flavors map[kueue.ResourceFlavorReference]*kueue.ResourceFlavor) {
+	for flavorName, rf := range flavors {
+		if rf.Spec.TopologyName != nil {
+			cq.tasResourceFlavorRef = &flavorName
+		}
+	}
 }
 
 func (c *clusterQueue) updateLabelKeys(flavors map[kueue.ResourceFlavorReference]*kueue.ResourceFlavor) {
@@ -426,12 +439,20 @@ func (c *clusterQueue) reportActiveWorkloads() {
 func (c *clusterQueue) updateWorkloadUsage(wi *workload.Info, m int64) {
 	admitted := workload.IsAdmitted(wi.Obj)
 	frUsage := wi.FlavorResourceUsage()
+	tasUsage := wi.TASUsage()
+	tasCacheRF := c.tasCacheRF()
 	for fr, q := range frUsage {
 		if m == 1 {
 			addUsage(c, fr, q)
+			if tasCacheRF != nil {
+				tasCacheRF.addUsage(tasUsage)
+			}
 		}
 		if m == -1 {
 			removeUsage(c, fr, q)
+			if tasCacheRF != nil {
+				tasCacheRF.removeUsage(tasUsage)
+			}
 		}
 	}
 	if admitted {
@@ -447,6 +468,13 @@ func (c *clusterQueue) updateWorkloadUsage(wi *workload.Info, m int64) {
 			lq.admittedWorkloads += int(m)
 		}
 	}
+}
+
+func (c *clusterQueue) tasCacheRF() *TASCacheRF {
+	if c.tasResourceFlavorRef == nil || c.tasCache == nil {
+		return nil
+	}
+	return c.tasCache.Get(*c.tasResourceFlavorRef)
 }
 
 func updateFlavorUsage(newUsage resources.FlavorResourceQuantities, oldUsage resources.FlavorResourceQuantities, m int64) {

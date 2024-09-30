@@ -174,6 +174,8 @@ type PodSetAssignment struct {
 	Status   *Status
 	Requests corev1.ResourceList
 	Count    int32
+
+	TopologyAssignment *kueue.TopologyAssignment
 }
 
 // RepresentativeMode calculates the representative mode for this assignment as
@@ -202,10 +204,11 @@ func (psa *PodSetAssignment) toAPI() kueue.PodSetAssignment {
 		flavors[res] = flvAssignment.Name
 	}
 	return kueue.PodSetAssignment{
-		Name:          psa.Name,
-		Flavors:       flavors,
-		ResourceUsage: psa.Requests,
-		Count:         ptr.To(psa.Count),
+		Name:               psa.Name,
+		Flavors:            flavors,
+		ResourceUsage:      psa.Requests,
+		Count:              ptr.To(psa.Count),
+		TopologyAssignment: psa.TopologyAssignment.DeepCopy(),
 	}
 }
 
@@ -312,19 +315,19 @@ func (a *FlavorAssigner) Assign(log logr.Logger, counts []int32) Assignment {
 		}
 		a.wl.LastAssignment = nil
 	}
-
-	if len(counts) == 0 {
-		return a.assignFlavors(log, a.wl.TotalRequests)
-	}
-
-	currentResources := make([]workload.PodSetResources, len(a.wl.TotalRequests))
-	for i := range a.wl.TotalRequests {
-		currentResources[i] = *a.wl.TotalRequests[i].ScaledTo(counts[i])
-	}
-	return a.assignFlavors(log, currentResources)
+	return a.assignFlavors(log, counts)
 }
 
-func (a *FlavorAssigner) assignFlavors(log logr.Logger, requests []workload.PodSetResources) Assignment {
+func (a *FlavorAssigner) assignFlavors(log logr.Logger, counts []int32) Assignment {
+	var requests []workload.PodSetResources
+	if len(counts) == 0 {
+		requests = a.wl.TotalRequests
+	} else {
+		requests = make([]workload.PodSetResources, len(a.wl.TotalRequests))
+		for i := range a.wl.TotalRequests {
+			requests[i] = *a.wl.TotalRequests[i].ScaledTo(counts[i])
+		}
+	}
 	assignment := Assignment{
 		PodSets: make([]PodSetAssignment, 0, len(requests)),
 		Usage:   make(resources.FlavorResourceQuantities),
@@ -335,6 +338,7 @@ func (a *FlavorAssigner) assignFlavors(log logr.Logger, requests []workload.PodS
 	}
 
 	for i, podSet := range requests {
+		podSetSpec := a.wl.Obj.Spec.PodSets[i]
 		if a.cq.RGByResource(corev1.ResourcePods) != nil {
 			podSet.Requests[corev1.ResourcePods] = int64(podSet.Count)
 		}
@@ -359,6 +363,32 @@ func (a *FlavorAssigner) assignFlavors(log logr.Logger, requests []workload.PodS
 				break
 			}
 			psAssignment.append(flavors, status)
+		}
+		if podSetSpec.TopologyRequest != nil {
+			if psAssignment.Status.IsError() {
+				log.Info("There is no resource quota assignment for the workload. No need to check TAS.", "message", psAssignment.Status.Message())
+			} else if a.cq.TASResourceFlavorSnapshot == nil {
+				if psAssignment.Status == nil {
+					psAssignment.Status = &Status{}
+				}
+				psAssignment.Status.append("Workload requires Topology, but there is no TAS cache information")
+				psAssignment.Flavors = nil
+			} else {
+				// Build the TAS assignment if possible
+				singlePodRequests := a.wl.TotalRequests[i].Requests.Clone()
+				singlePodRequests.Divide(int64(a.wl.TotalRequests[i].Count))
+				podCount := podSet.Count
+				psAssignment.TopologyAssignment = a.cq.TASResourceFlavorSnapshot.FindTopologyAssignment(podSetSpec.TopologyRequest,
+					singlePodRequests, podCount)
+				if psAssignment.TopologyAssignment == nil {
+					if psAssignment.Status == nil {
+						psAssignment.Status = &Status{}
+					}
+					psAssignment.Status.append("Workload cannot fit within the TAS ResourceFlavor")
+					psAssignment.Flavors = nil
+				}
+				log.Info("TAS PodSet assignment", "tasAssignment", psAssignment.TopologyAssignment)
+			}
 		}
 
 		assignment.append(podSet.Requests, &psAssignment)

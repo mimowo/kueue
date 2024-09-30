@@ -51,6 +51,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	"sigs.k8s.io/kueue/pkg/controller/tas"
 	"sigs.k8s.io/kueue/pkg/debugger"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/metrics"
@@ -109,11 +110,13 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	setupLog.Info("MYDEBUG:0")
 
 	if err := utilfeature.DefaultMutableFeatureGate.Set(featureGates); err != nil {
 		setupLog.Error(err, "Unable to set flag gates for known features")
 		os.Exit(1)
 	}
+	setupLog.Info("MYDEBUG:1")
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("Initializing", "gitVersion", version.GitVersion, "gitCommit", version.GitCommit)
@@ -162,16 +165,27 @@ func main() {
 	if cfg.FairSharing != nil {
 		cacheOptions = append(cacheOptions, cache.WithFairSharing(cfg.FairSharing.Enable))
 	}
+	setupLog.Info("MYDEBUG1 before ctrl.SetupSignalHandler")
+	ctx := ctrl.SetupSignalHandler()
+	if tas.Enabled() {
+		setupLog.Info("MYDEBUG2 inside tas.Enabled")
+		mgrCache := mgr.GetCache()
+		_, err := mgrCache.GetInformer(ctx, &corev1.Node{})
+		if err != nil {
+			setupLog.Error(err, "Unable to setup TAS informer for Nodes")
+		}
+		cacheOptions = append(cacheOptions, cache.WithInformerCache(mgrCache))
+	}
 	cCache := cache.New(mgr.GetClient(), cacheOptions...)
 	queues := queue.NewManager(mgr.GetClient(), cCache, queueOptions...)
+	setupLog.Info("MYDEBUG3")
 
-	ctx := ctrl.SetupSignalHandler()
 	if err := setupIndexes(ctx, mgr, &cfg); err != nil {
 		setupLog.Error(err, "Unable to setup indexes")
 		os.Exit(1)
 	}
 	debugger.NewDumper(cCache, queues).ListenForSignal(ctx)
-
+	setupLog.Info("MYDEBUG4")
 	serverVersionFetcher := setupServerVersionFetcher(mgr, kubeConfig)
 
 	setupProbeEndpoints(mgr, certsReady)
@@ -186,7 +200,7 @@ func main() {
 	if features.Enabled(features.VisibilityOnDemand) {
 		go visibility.CreateAndStartVisibilityServer(ctx, queues)
 	}
-
+	setupLog.Info("MYDEBUG5")
 	setupScheduler(mgr, cCache, queues, &cfg)
 
 	setupLog.Info("Starting manager")
@@ -257,6 +271,13 @@ func setupControllers(ctx context.Context, mgr ctrl.Manager, cCache *cache.Cache
 			multikueue.WithWorkerLostTimeout(cfg.MultiKueue.WorkerLostTimeout.Duration),
 		); err != nil {
 			setupLog.Error(err, "Could not setup MultiKueue controller")
+			os.Exit(1)
+		}
+	}
+
+	if tas.Enabled() {
+		if failedCtrl, err := tas.SetupControllers(mgr, queues, cCache, cfg); err != nil {
+			setupLog.Error(err, "Could not setup TAS controller", "controller", failedCtrl)
 			os.Exit(1)
 		}
 	}

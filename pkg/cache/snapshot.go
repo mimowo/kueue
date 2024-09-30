@@ -17,6 +17,7 @@ limitations under the License.
 package cache
 
 import (
+	"context"
 	"maps"
 
 	"github.com/go-logr/logr"
@@ -76,6 +77,10 @@ func (s *Snapshot) Log(log logr.Logger) {
 }
 
 func (c *Cache) Snapshot() Snapshot {
+	return c.SnapshotWithCtx(context.TODO())
+}
+
+func (c *Cache) SnapshotWithCtx(ctx context.Context) Snapshot {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -94,15 +99,30 @@ func (c *Cache) Snapshot() Snapshot {
 			snap.UpdateCohortEdge(cohort.Name, cohort.Parent().Name)
 		}
 	}
+	tasRfSnapshots := make(map[kueue.ResourceFlavorReference]*TASResourceFlavorSnapshot)
 	for _, cq := range c.hm.ClusterQueues {
 		if !cq.Active() || (cq.HasParent() && c.hm.CycleChecker.HasCycle(cq.Parent())) {
 			snap.InactiveClusterQueueSets.Insert(cq.Name)
 			continue
 		}
-		snap.AddClusterQueue(snapshotClusterQueue(cq))
+		cqSnapshot := snapshotClusterQueue(cq)
+		snap.ClusterQueues[cq.Name] = cqSnapshot
 		if cq.HasParent() {
 			snap.UpdateClusterQueueEdge(cq.Name, cq.Parent().Name)
 		}
+		if cq.tasResourceFlavorRef != nil {
+			tasRfRef := *cq.tasResourceFlavorRef
+			if tasRfSnapshot, found := tasRfSnapshots[tasRfRef]; found {
+				cqSnapshot.TASResourceFlavorSnapshot = tasRfSnapshot
+			} else {
+				if tasRf, found := c.tasCache.Map[tasRfRef]; found {
+					newSnapshot := tasRf.snapshot(ctx)
+					tasRfSnapshots[tasRfRef] = newSnapshot
+					cqSnapshot.TASResourceFlavorSnapshot = newSnapshot
+				}
+			}
+		}
+		snap.AddClusterQueue(cqSnapshot)
 	}
 	for name, rf := range c.resourceFlavors {
 		// Shallow copy is enough

@@ -30,7 +30,7 @@ function cleanup {
         if [ ! -d "$ARTIFACTS" ]; then
             mkdir -p "$ARTIFACTS"
         fi
-	cluster_cleanup "$KIND_CLUSTER_NAME"
+	#cluster_cleanup "$KIND_CLUSTER_NAME"
     fi
     #do the image restore here for the case when an error happened during deploy
     restore_managers_image
@@ -42,7 +42,7 @@ function startup {
         if [ ! -d "$ARTIFACTS" ]; then
             mkdir -p "$ARTIFACTS"
         fi
-	cluster_create "$KIND_CLUSTER_NAME"  "$SOURCE_DIR/kind-cluster.yaml" 
+	cluster_create "$KIND_CLUSTER_NAME"  "$SOURCE_DIR/kind-cluster.yaml"
     fi
 }
 

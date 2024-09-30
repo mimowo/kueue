@@ -1,0 +1,97 @@
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// PodSetTopologyRequiredAnnotation indicates that a PodSet requires Topology Aware Scheduling,
+	// and running all pods on nodes closely connected within the same level of
+	// hierarchy is a strong requirement for scheduling the workload.
+	PodSetTopologyRequiredAnnotation = "kueue.x-k8s.io/podset-required-topology"
+
+	// PodSetPreferredTopologyAnnotation indicates that a PodSet requires Topology Aware Scheduling,
+	// but running all pods without the same topology level is a preference rather
+	// than requirement.
+	//
+	// The levels are evaluated one-by-one going up from the level indicated by
+	// the annotation. If the PodSet cannot fit within a given topology domain
+	// then the next topology level up is checked. If the PodSet cannot fit
+	// at the highest topology level, then it gets admitted as distributed
+	// among multiple topology domains.
+	PodSetPreferredTopologyAnnotation = "kueue.x-k8s.io/podset-preferred-topology"
+
+	// TopologySchedulingGate is used to delay topology assignment for pods
+	// once all the pods are created.
+	TopologySchedulingGate = "kueue.x-k8s.io/topology"
+)
+
+// TopologySpec defines the desired state of Topology
+type TopologySpec struct {
+	// TopologyLevels define the levels of topology.
+	//
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=5
+	Levels []TopologyLevel `json:"levels,omitempty"`
+}
+
+// TopologyLevel defines the desired state of TopologyLevel
+type TopologyLevel struct {
+	// NodeLabel indicates the name of the node label for a specific topology
+	// level.
+	//
+	// +required
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=316
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$`
+	NodeLabel string `json:"nodeLabel,omitempty"`
+}
+
+// TopologyStatus defines the observed state of Topology
+type TopologyStatus struct {
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:storageversion
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
+
+// Topology is the Schema for the topology API
+type Topology struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   TopologySpec   `json:"spec,omitempty"`
+	Status TopologyStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// TopologyList contains a list of Topology
+type TopologyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Topology `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&Topology{}, &TopologyList{})
+}

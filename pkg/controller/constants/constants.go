@@ -39,4 +39,10 @@ const (
 
 	// ProvReqAnnotationPrefix is the prefix for annotations that should be pass to ProvisioningRequest as Parameters.
 	ProvReqAnnotationPrefix = "provreq.kueue.x-k8s.io/"
+
+	// WorkloadAnnotation indicates the name of the workload assigned.
+	WorkloadAnnotation = "kueue.x-k8s.io/workload"
+
+	// PodSetLabel indicates the name of the PodSet in the workload
+	PodSetLabel = "kueue.x-k8s.io/podset"
 )

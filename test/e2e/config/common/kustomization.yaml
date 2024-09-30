@@ -6,7 +6,7 @@ resources:
 
 replicas:
 - name: kueue-controller-manager
-  count: 2
+  count: 1
 
 patches:
 - path: manager_e2e_patch.yaml

@@ -77,6 +77,18 @@ type WorkloadSpec struct {
 	Active *bool `json:"active,omitempty"`
 }
 
+type PodSetTopologyRequest struct {
+	// Required is the level label indicated by the `kueue.x-k8s.io/podset-required-topology` annotation
+	//
+	// +optional
+	Required *string `json:"required,omitempty"`
+
+	// Preferred is the level label indicated by the `kueue.x-k8s.io/podset-preferred-topology` annotation
+	//
+	// +optional
+	Preferred *string `json:"preferred,omitempty"`
+}
+
 type Admission struct {
 	// clusterQueue is the name of the ClusterQueue that admitted this workload.
 	ClusterQueue ClusterQueueReference `json:"clusterQueue"`
@@ -113,6 +125,33 @@ type PodSetAssignment struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Count *int32 `json:"count,omitempty"`
+
+	// TopologyAssignment indicates the resources assigned per topology level
+	// +optional
+	TopologyAssignment *TopologyAssignment `json:"topologyAssignment,omitempty"`
+}
+
+type TopologyAssignment struct {
+	// Domains contains the list of assignments split into lowest-level groups
+	// +optional
+	Domains []TopologyDomainAssignment `json:"domains,omitempty"`
+}
+
+type TopologyDomainAssignment struct {
+	// Levels specifies the assigned nodeLabel values per each level of the
+	// assigned topology.
+	Levels []TopologyDomainAssignmentLevel `json:"levels,omitempty"`
+
+	// Count indicates the number of pods in a given TopologyAssignmentSlice
+	Count int `json:"count,omitempty"`
+}
+
+type TopologyDomainAssignmentLevel struct {
+	// NodeLabel specifies the key of the nodeLabel for a given level of topology.
+	NodeLabel string `json:"nodeLabel,omitempty"`
+
+	// NodeLabel specifies the value of the nodeLabel for a given level of topology.
+	NodeLabelValue string `json:"nodeLabelValue,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.minCount) ? self.minCount <= self.count : true", message="minCount should be positive and less or equal to count"
@@ -156,6 +195,11 @@ type PodSet struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MinCount *int32 `json:"minCount,omitempty"`
+
+	// TopologyRequest defines the topology requested for the corresponding Job.
+	//
+	// +optional
+	TopologyRequest *PodSetTopologyRequest `json:"topologyRequest,omitempty"`
 }
 
 // WorkloadStatus defines the observed state of Workload

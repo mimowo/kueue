@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/limitrange"
 	utilmaps "sigs.k8s.io/kueue/pkg/util/maps"
 	utilslices "sigs.k8s.io/kueue/pkg/util/slices"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 )
 
 const (
@@ -157,11 +158,22 @@ type PodSetResources struct {
 	// Count indicates how many pods are in the podset.
 	Count int32
 
+	// TopologyRequests specifies the requests for TAS
+	TopologyRequests []TopologyDomainRequests
+
 	// Flavors are populated when the Workload is assigned.
 	Flavors map[corev1.ResourceName]kueue.ResourceFlavorReference
 }
 
+type TopologyDomainRequests struct {
+	NodeLabels map[string]string
+	Requests   resources.Requests
+}
+
 func (psr *PodSetResources) ScaledTo(newCount int32) *PodSetResources {
+	if len(psr.TopologyRequests) > 0 {
+		return psr
+	}
 	ret := &PodSetResources{
 		Name:     psr.Name,
 		Requests: maps.Clone(psr.Requests),
@@ -219,6 +231,15 @@ func (i *Info) FlavorResourceUsage() resources.FlavorResourceQuantities {
 		}
 	}
 	return total
+}
+
+// TASUsage returns usage requested by the Workload
+func (i *Info) TASUsage() []TopologyDomainRequests {
+	result := make([]TopologyDomainRequests, 0)
+	for _, ps := range i.TotalRequests {
+		result = append(result, ps.TopologyRequests...)
+	}
+	return result
 }
 
 func dropExcludedResources(resources []PodSetResources, excludedPrefixes []string) {
@@ -307,10 +328,22 @@ func totalRequestsFromAdmission(wl *kueue.Workload) []PodSetResources {
 	totalCounts := podSetsCounts(wl)
 	for _, psa := range wl.Status.Admission.PodSetAssignments {
 		setRes := PodSetResources{
-			Name:     psa.Name,
-			Flavors:  psa.Flavors,
-			Count:    ptr.Deref(psa.Count, totalCounts[psa.Name]),
-			Requests: resources.NewRequests(psa.ResourceUsage),
+			Name:             psa.Name,
+			Flavors:          psa.Flavors,
+			Count:            ptr.Deref(psa.Count, totalCounts[psa.Name]),
+			Requests:         resources.NewRequests(psa.ResourceUsage),
+			TopologyRequests: make([]TopologyDomainRequests, 0),
+		}
+		if psa.TopologyAssignment != nil {
+			for _, domain := range psa.TopologyAssignment.Domains {
+				domainRequests := setRes.Requests.Clone()
+				scaleDown(domainRequests, int64(setRes.Count))
+				scaleUp(domainRequests, int64(domain.Count))
+				setRes.TopologyRequests = append(setRes.TopologyRequests, TopologyDomainRequests{
+					NodeLabels: utiltas.AsNodeLabels(domain.Levels),
+					Requests:   domainRequests,
+				})
+			}
 		}
 
 		// If countAfterReclaim is lower then the admission count indicates that

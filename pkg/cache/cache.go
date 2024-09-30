@@ -30,10 +30,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
+
 	utilindexer "sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/hierarchy"
 	"sigs.k8s.io/kueue/pkg/metrics"
@@ -57,6 +59,7 @@ type options struct {
 	workloadInfoOptions []workload.InfoOption
 	podsReadyTracking   bool
 	fairSharingEnabled  bool
+	informerCache       cache.Cache
 }
 
 // Option configures the reconciler.
@@ -83,6 +86,12 @@ func WithFairSharing(enabled bool) Option {
 	}
 }
 
+func WithInformerCache(informerCache cache.Cache) Option {
+	return func(o *options) {
+		o.informerCache = informerCache
+	}
+}
+
 var defaultOptions = options{}
 
 // Cache keeps track of the Workloads that got admitted through ClusterQueues.
@@ -99,6 +108,8 @@ type Cache struct {
 	fairSharingEnabled  bool
 
 	hm hierarchy.Manager[*clusterQueue, *cohort]
+
+	tasCache TASCache
 }
 
 func New(client client.Client, opts ...Option) *Cache {
@@ -115,6 +126,7 @@ func New(client client.Client, opts ...Option) *Cache {
 		workloadInfoOptions: options.workloadInfoOptions,
 		fairSharingEnabled:  options.fairSharingEnabled,
 		hm:                  hierarchy.NewManager[*clusterQueue, *cohort](newCohort),
+		tasCache:            NewCache(options.informerCache),
 	}
 	c.podsReadyCond.L = &c.RWMutex
 	return c
@@ -130,6 +142,7 @@ func (c *Cache) newClusterQueue(cq *kueue.ClusterQueue) (*clusterQueue, error) {
 		workloadInfoOptions: c.workloadInfoOptions,
 		AdmittedUsage:       make(resources.FlavorResourceQuantities),
 		resourceNode:        NewResourceNode(),
+		tasCache:            &c.tasCache,
 	}
 	c.hm.AddClusterQueue(cqImpl)
 	c.hm.UpdateClusterQueueEdge(cq.Name, cq.Spec.Cohort)
@@ -213,6 +226,22 @@ func (c *Cache) updateClusterQueues() sets.Set[string] {
 		}
 	}
 	return cqs
+}
+
+func (c *Cache) GetActiveClusterQueues() sets.Set[string] {
+	c.Lock()
+	defer c.Unlock()
+	cqs := sets.New[string]()
+	for _, cq := range c.hm.ClusterQueues {
+		if cq.Status == active {
+			cqs.Insert(cq.Name)
+		}
+	}
+	return cqs
+}
+
+func (c *Cache) GetTASCache() *TASCache {
+	return &c.tasCache
 }
 
 func (c *Cache) AddOrUpdateResourceFlavor(rf *kueue.ResourceFlavor) sets.Set[string] {
