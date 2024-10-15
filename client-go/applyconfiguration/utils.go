@@ -101,6 +101,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &kueuev1beta1.PodSetApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("PodSetAssignment"):
 		return &kueuev1beta1.PodSetAssignmentApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("PodSetTopologyRequest"):
+		return &kueuev1beta1.PodSetTopologyRequestApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("PodSetUpdate"):
 		return &kueuev1beta1.PodSetUpdateApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("ProvisioningRequestConfig"):
@@ -121,6 +123,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &kueuev1beta1.ResourceQuotaApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("ResourceUsage"):
 		return &kueuev1beta1.ResourceUsageApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("TopologyAssignment"):
+		return &kueuev1beta1.TopologyAssignmentApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("TopologyDomainAssignment"):
+		return &kueuev1beta1.TopologyDomainAssignmentApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("Workload"):
 		return &kueuev1beta1.WorkloadApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("WorkloadPriorityClass"):

@@ -123,4 +123,100 @@ will be rejected by the webhook.</p>
 </tr>
 </tbody>
 </table>
+
+## `Topology`     {#kueue-x-k8s-io-v1alpha1-Topology}
+    
+
+**Appears in:**
+
+
+
+<p>Topology is the Schema for the topology API</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>spec</code> <B>[Required]</B><br/>
+<a href="#kueue-x-k8s-io-v1alpha1-TopologySpec"><code>TopologySpec</code></a>
+</td>
+<td>
+   <span class="text-muted">No description provided.</span></td>
+</tr>
+<tr><td><code>status</code> <B>[Required]</B><br/>
+<a href="#kueue-x-k8s-io-v1alpha1-TopologyStatus"><code>TopologyStatus</code></a>
+</td>
+<td>
+   <span class="text-muted">No description provided.</span></td>
+</tr>
+</tbody>
+</table>
+
+## `TopologyLevel`     {#kueue-x-k8s-io-v1alpha1-TopologyLevel}
+    
+
+**Appears in:**
+
+- [TopologySpec](#kueue-x-k8s-io-v1alpha1-TopologySpec)
+
+
+<p>TopologyLevel defines the desired state of TopologyLevel</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>nodeLabel</code> <B>[Required]</B><br/>
+<code>string</code>
+</td>
+<td>
+   <p>NodeLabel indicates the name of the node label for a specific topology
+level.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `TopologySpec`     {#kueue-x-k8s-io-v1alpha1-TopologySpec}
+    
+
+**Appears in:**
+
+- [Topology](#kueue-x-k8s-io-v1alpha1-Topology)
+
+
+<p>TopologySpec defines the desired state of Topology</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>levels</code> <B>[Required]</B><br/>
+<a href="#kueue-x-k8s-io-v1alpha1-TopologyLevel"><code>[]TopologyLevel</code></a>
+</td>
+<td>
+   <p>TopologyLevels define the levels of topology.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `TopologyStatus`     {#kueue-x-k8s-io-v1alpha1-TopologyStatus}
+    
+
+**Appears in:**
+
+- [Topology](#kueue-x-k8s-io-v1alpha1-Topology)
+
+
+<p>TopologyStatus defines the observed state of Topology</p>
+
+
+
   

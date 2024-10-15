@@ -1542,6 +1542,13 @@ enabled.</p>
 <p>This is an alpha field and requires enabling PartialAdmission feature gate.</p>
 </td>
 </tr>
+<tr><td><code>topologyRequest</code><br/>
+<a href="#kueue-x-k8s-io-v1beta1-PodSetTopologyRequest"><code>PodSetTopologyRequest</code></a>
+</td>
+<td>
+   <p>TopologyRequest defines the topology requested for the corresponding Job.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -1591,6 +1598,44 @@ This field will not change in case of quota reclaim.</p>
 This field will not change in case of quota reclaim.
 Value could be missing for Workloads created before this field was added,
 in that case spec.podSets[*].count value will be used.</p>
+</td>
+</tr>
+<tr><td><code>topologyAssignment</code><br/>
+<a href="#kueue-x-k8s-io-v1beta1-TopologyAssignment"><code>TopologyAssignment</code></a>
+</td>
+<td>
+   <p>TopologyAssignment indicates the resources assigned per topology level</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `PodSetTopologyRequest`     {#kueue-x-k8s-io-v1beta1-PodSetTopologyRequest}
+    
+
+**Appears in:**
+
+- [PodSet](#kueue-x-k8s-io-v1beta1-PodSet)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>required</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>Required is the level label indicated by the <code>kueue.x-k8s.io/podset-required-topology</code> annotation</p>
+</td>
+</tr>
+<tr><td><code>preferred</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>Preferred is the level label indicated by the <code>kueue.x-k8s.io/podset-preferred-topology</code> annotation</p>
 </td>
 </tr>
 </tbody>
@@ -1862,6 +1907,15 @@ cloud.provider.com/preemptible=&quot;true&quot;:NoSchedule</p>
 <p>tolerations can be up to 8 elements.</p>
 </td>
 </tr>
+<tr><td><code>topologyName</code><br/>
+<code>string</code>
+</td>
+<td>
+   <p>TopologyName indicates topology for the TAS ResourceFlavor.
+When specified, it enables scraping of the topology information from the
+nodes matching to the Resource Flavor node labels.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -2029,6 +2083,68 @@ words, it's the used quota that is over the nominalQuota.</p>
 
 
 
+
+## `TopologyAssignment`     {#kueue-x-k8s-io-v1beta1-TopologyAssignment}
+    
+
+**Appears in:**
+
+- [PodSetAssignment](#kueue-x-k8s-io-v1beta1-PodSetAssignment)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>domains</code><br/>
+<a href="#kueue-x-k8s-io-v1beta1-TopologyDomainAssignment"><code>[]TopologyDomainAssignment</code></a>
+</td>
+<td>
+   <p>Domains contains the list of assignments split into lowest-level groups</p>
+</td>
+</tr>
+<tr><td><code>levels</code> <B>[Required]</B><br/>
+<code>[]string</code>
+</td>
+<td>
+   <p>Levels specifies the ordered list of keys for the assigned nodeSelectors.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `TopologyDomainAssignment`     {#kueue-x-k8s-io-v1beta1-TopologyDomainAssignment}
+    
+
+**Appears in:**
+
+- [TopologyAssignment](#kueue-x-k8s-io-v1beta1-TopologyAssignment)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>values</code> <B>[Required]</B><br/>
+<code>[]string</code>
+</td>
+<td>
+   <p>Values specifies the values of nodeSelectors for the corresponding topology levels.</p>
+</td>
+</tr>
+<tr><td><code>count</code> <B>[Required]</B><br/>
+<code>int</code>
+</td>
+<td>
+   <p>Count indicates the number of pods in a given TopologyAssignmentSlice</p>
+</td>
+</tr>
+</tbody>
+</table>
 
 ## `WorkloadSpec`     {#kueue-x-k8s-io-v1beta1-WorkloadSpec}
     

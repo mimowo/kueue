@@ -8168,6 +8168,19 @@ spec:
                           - containers
                           type: object
                       type: object
+                    topologyRequest:
+                      description: TopologyRequest defines the topology requested
+                        for the corresponding Job.
+                      properties:
+                        preferred:
+                          description: Preferred is the level label indicated by the
+                            `kueue.x-k8s.io/podset-preferred-topology` annotation
+                          type: string
+                        required:
+                          description: Required is the level label indicated by the
+                            `kueue.x-k8s.io/podset-required-topology` annotation
+                          type: string
+                      type: object
                   required:
                   - count
                   - template
@@ -8284,6 +8297,34 @@ spec:
                             Beside what is provided in podSet's specs, this calculation takes into account
                             the LimitRange defaults and RuntimeClass overheads at the moment of admission.
                             This field will not change in case of quota reclaim.
+                          type: object
+                        topologyAssignment:
+                          description: TopologyAssignment indicates the resources
+                            assigned per topology level
+                          properties:
+                            domains:
+                              description: Domains contains the list of assignments
+                                split into lowest-level groups
+                              items:
+                                properties:
+                                  count:
+                                    description: Count indicates the number of pods
+                                      in a given TopologyAssignmentSlice
+                                    type: integer
+                                  values:
+                                    description: Values specifies the values of nodeSelectors
+                                      for the corresponding topology levels.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
+                              type: array
+                            levels:
+                              description: Levels specifies the ordered list of keys
+                                for the assigned nodeSelectors.
+                              items:
+                                type: string
+                              type: array
                           type: object
                       required:
                       - name
