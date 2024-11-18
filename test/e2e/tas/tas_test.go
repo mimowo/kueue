@@ -21,10 +21,12 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
@@ -245,6 +247,55 @@ var _ = ginkgo.Describe("TopologyAwareScheduling", func() {
 					g.Expect(createdWorkload.Status.Admission.PodSetAssignments[0].TopologyAssignment).ShouldNot(gomega.BeNil())
 					g.Expect(createdWorkload.Status.Conditions).Should(testing.HaveConditionStatusTrue(kueue.WorkloadFinished))
 				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+		})
+
+		ginkgo.FIt("Should place pods based on the ranks-ordering", func() {
+			sampleJob := testingjob.MakeJob("ranks-job", ns.Name).
+				Queue(localQueue.Name).
+				Parallelism(4).
+				Completions(4).
+				Indexed(true).
+				Request(extraResource, "1").
+				Limit(extraResource, "1").
+				Obj()
+			sampleJob = (&testingjob.JobWrapper{Job: *sampleJob}).
+				PodAnnotation(kueuealpha.PodSetRequiredTopologyAnnotation, topologyLevelBlock).
+				Image(util.E2eTestSleepImage, []string{"60s"}).
+				Obj()
+			gomega.Expect(k8sClient.Create(ctx, sampleJob)).Should(gomega.Succeed())
+			defer func() {
+				util.ExpectObjectToBeDeleted(ctx, k8sClient, sampleJob, true)
+			}()
+
+			wlLookupKey := types.NamespacedName{Name: workloadjob.GetWorkloadNameForJob(sampleJob.Name, sampleJob.UID), Namespace: ns.Name}
+			createdWorkload := &kueue.Workload{}
+
+			ginkgo.By(fmt.Sprintf("verify the workload %q has TopologyAssignment", wlLookupKey), func() {
+				gomega.Eventually(func(g gomega.Gomega) {
+					g.Expect(k8sClient.Get(ctx, wlLookupKey, createdWorkload)).Should(gomega.Succeed())
+					g.Expect(createdWorkload.Status.Admission.PodSetAssignments[0].TopologyAssignment).ShouldNot(gomega.BeNil())
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By("Job is unsuspended and running", func() {
+				gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sampleJob), sampleJob)).To(gomega.Succeed())
+					g.Expect(sampleJob.Spec.Suspend).Should(gomega.Equal(ptr.To(false)))
+				}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
+			})
+
+			ginkgo.By(fmt.Sprintf("fetching the Pods of %q to check their rank-based distribution", wlLookupKey), func() {
+				pods := &corev1.PodList{}
+				gomega.Expect(k8sClient.List(ctx, pods, client.InNamespace(ns.Name),
+					client.MatchingLabels(sampleJob.Spec.Selector.MatchLabels))).To(gomega.Succeed())
+				ginkgo.By(fmt.Sprintf("Fetched pods count: %v", len(pods.Items)))
+				for _, pod := range pods.Items {
+					ginkgo.By(fmt.Sprintf("Fetched index: %v, nodeName: %v, nodeSelector: %v",
+						pod.Labels[batchv1.JobCompletionIndexAnnotation],
+						pod.Spec.NodeName,
+						pod.Spec.NodeSelector))
+				}
 			})
 		})
 	})
