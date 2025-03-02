@@ -5163,6 +5163,7 @@ func TestScheduleForTASPreemption(t *testing.T) {
 			},
 		},
 	}
+	eventIgnoreMessage := cmpopts.IgnoreFields(utiltesting.EventRecord{}, "Message")
 	cases := map[string]struct {
 		nodes           []corev1.Node
 		pods            []corev1.Pod
@@ -5549,6 +5550,67 @@ func TestScheduleForTASPreemption(t *testing.T) {
 					EventType: "Warning",
 					Reason:    "Pending",
 					Message:   `couldn't assign flavors to pod set one: topology "tas-single-level" allows to fit only 1 out of 2 pod(s)`,
+				},
+			},
+		},
+		"incoming workload is preempting and trimmed to fit on a single node": {
+			// The incoming workload is able to preempt thanks to the partial
+			// admission.
+			nodes:           defaultSingleNode,
+			topologies:      []kueuealpha.Topology{defaultSingleLevelTopology},
+			resourceFlavors: []kueue.ResourceFlavor{defaultTASFlavor},
+			clusterQueues:   []kueue.ClusterQueue{defaultClusterQueueWithPreemption},
+			workloads: []kueue.Workload{
+				*utiltesting.MakeWorkload("foo", "default").
+					Priority(2).
+					Queue("tas-main").
+					PodSets(*utiltesting.MakePodSet("one", 6).
+						SetMinimumCount(5).
+						RequiredTopologyRequest(corev1.LabelHostname).
+						Request(corev1.ResourceCPU, "1").
+						Obj()).
+					Obj(),
+				*utiltesting.MakeWorkload("low-priority-admitted", "default").
+					Queue("tas-main").
+					Priority(1).
+					ReserveQuota(
+						utiltesting.MakeAdmission("tas-main", "one").
+							Assignment(corev1.ResourceCPU, "tas-default", "1").
+							AssignmentPodCount(1).
+							TopologyAssignment(&kueue.TopologyAssignment{
+								Levels: utiltas.Levels(&defaultSingleLevelTopology),
+								Domains: []kueue.TopologyDomainAssignment{
+									{
+										Count: 1,
+										Values: []string{
+											"x1",
+										},
+									},
+								},
+							}).Obj(),
+					).
+					Admitted(true).
+					PodSets(*utiltesting.MakePodSet("one", 1).
+						RequiredTopologyRequest(corev1.LabelHostname).
+						Request(corev1.ResourceCPU, "1").
+						Obj()).
+					Obj(),
+			},
+			wantPreempted: sets.New("default/low-priority-admitted"),
+			wantLeft: map[string][]string{
+				"tas-main": {"default/foo"},
+			},
+			eventCmpOpts: []cmp.Option{eventIgnoreMessage},
+			wantEvents: []utiltesting.EventRecord{
+				{
+					Key:       types.NamespacedName{Namespace: "default", Name: "low-priority-admitted"},
+					Reason:    "Preempted",
+					EventType: corev1.EventTypeNormal,
+				},
+				{
+					Key:       types.NamespacedName{Namespace: "default", Name: "foo"},
+					Reason:    "Pending",
+					EventType: corev1.EventTypeWarning,
 				},
 			},
 		},
