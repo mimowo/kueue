@@ -307,6 +307,11 @@ func matchingGVK(integration IntegrationCallbacks, gvk schema.GroupVersionKind) 
 	}
 }
 
+func ownerReferenceMatchingGVK(ownerRef *metav1.OwnerReference, gvk schema.GroupVersionKind) bool {
+	apiVersion, kind := gvk.ToAPIVersionAndKind()
+	return ownerRef.APIVersion == apiVersion && ownerRef.Kind == kind
+}
+
 // GetIntegrationsList returns the list of currently registered frameworks.
 func GetIntegrationsList() []string {
 	return manager.getList()
