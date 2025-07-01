@@ -1936,6 +1936,50 @@ func TestFairPreemptions(t *testing.T) {
 		targetCQ      kueue.ClusterQueueReference
 		wantPreempted sets.Set[string]
 	}{
+		"repro1": {
+			clusterQueues: []*kueue.ClusterQueue{
+				utiltesting.MakeClusterQueue("cq1").
+					Cohort("test").
+					ResourceGroup(*utiltesting.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "2", "6").Obj()).
+					FairWeight(resource.MustParse("0.0")).
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+					}).
+					Obj(),
+				utiltesting.MakeClusterQueue("cq2").
+					Cohort("test").
+					ResourceGroup(*utiltesting.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "0", "8").Obj()).
+					FairWeight(resource.MustParse("3.2")).
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+					}).
+					Obj(),
+				utiltesting.MakeClusterQueue("cq3").
+					Cohort("test").
+					ResourceGroup(*utiltesting.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "6", "2").Obj()).
+					FairWeight(resource.MustParse("4.8")).
+					Preemption(kueue.ClusterQueuePreemption{
+						WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+					}).
+					Obj(),
+			},
+			strategies: []config.PreemptionStrategy{config.LessThanOrEqualToFinalShare},
+			admitted: []kueue.Workload{
+				*utiltesting.MakeWorkload("wl1", "").Request(corev1.ResourceCPU, "2").SimpleReserveQuota("cq1", "default", now).Obj(),
+				*utiltesting.MakeWorkload("wl2", "").Request(corev1.ResourceCPU, "2").SimpleReserveQuota("cq1", "default", now).Obj(),
+				*utiltesting.MakeWorkload("wl3", "").Request(corev1.ResourceCPU, "2").SimpleReserveQuota("cq2", "default", now).Obj(),
+				*utiltesting.MakeWorkload("wl4", "").Request(corev1.ResourceCPU, "2").SimpleReserveQuota("cq2", "default", now).Obj(),
+			},
+			incoming:      utiltesting.MakeWorkload("wl5", "").Request(corev1.ResourceCPU, "2").Obj(),
+			targetCQ:      "cq2",
+			wantPreempted: sets.New(targetKeyReason("/wl1", kueue.InCohortFairSharingReason)),
+		},
 		"reclaim nominal from user using the most": {
 			clusterQueues: baseCQs,
 			admitted: []kueue.Workload{
