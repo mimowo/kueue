@@ -30,7 +30,7 @@ function cleanup {
         if [ ! -d "$ARTIFACTS" ]; then
             mkdir -p "$ARTIFACTS"
         fi
-        cluster_cleanup "$KIND_CLUSTER_NAME" ""
+    #    cluster_cleanup "$KIND_CLUSTER_NAME" ""
     fi
 }
 

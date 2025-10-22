@@ -114,33 +114,33 @@ function prepare_docker_images {
     docker tag "$E2E_TEST_AGNHOST_IMAGE_OLD_WITH_SHA" "$E2E_TEST_AGNHOST_IMAGE_OLD"
     docker tag "$E2E_TEST_AGNHOST_IMAGE_WITH_SHA" "$E2E_TEST_AGNHOST_IMAGE"
 
-    if [[ -n ${APPWRAPPER_VERSION:-} ]]; then
-        docker pull "${APPWRAPPER_IMAGE}"
-    fi
-    if [[ -n ${JOBSET_VERSION:-} ]]; then
-        docker pull "${JOBSET_IMAGE}"
-    fi
-    if [[ -n ${KUBEFLOW_VERSION:-} ]]; then
-        docker pull "${KUBEFLOW_IMAGE}"
-    fi
+    # if [[ -n ${APPWRAPPER_VERSION:-} ]]; then
+    #     docker pull "${APPWRAPPER_IMAGE}"
+    # fi
+    # if [[ -n ${JOBSET_VERSION:-} ]]; then
+    #     docker pull "${JOBSET_IMAGE}"
+    # fi
+    # if [[ -n ${KUBEFLOW_VERSION:-} ]]; then
+    #     docker pull "${KUBEFLOW_IMAGE}"
+    # fi
     
-    if [[ -n ${KUBEFLOW_TRAINER_VERSION:-} ]]; then
-        docker pull "${KF_TRAINER_IMAGE}"
-    fi
+    # if [[ -n ${KUBEFLOW_TRAINER_VERSION:-} ]]; then
+    #     docker pull "${KF_TRAINER_IMAGE}"
+    # fi
 
-    if [[ -n ${KUBEFLOW_MPI_VERSION:-} ]]; then
-        docker pull "${KUBEFLOW_MPI_IMAGE}"
-    fi
-    if [[ -n ${KUBERAY_VERSION:-} ]]; then
-        docker pull "${KUBERAY_IMAGE}"
-        determine_kuberay_ray_image
-        if [[ ${USE_RAY_FOR_TESTS:-} == "ray" ]]; then
-            docker pull "${KUBERAY_RAY_IMAGE}"
-        fi
-    fi
-    if [[ -n ${LEADERWORKERSET_VERSION:-} ]]; then
-        docker pull "${LEADERWORKERSET_IMAGE}"
-    fi
+    # if [[ -n ${KUBEFLOW_MPI_VERSION:-} ]]; then
+    #     docker pull "${KUBEFLOW_MPI_IMAGE}"
+    # fi
+    # if [[ -n ${KUBERAY_VERSION:-} ]]; then
+    #     docker pull "${KUBERAY_IMAGE}"
+    #     determine_kuberay_ray_image
+    #     if [[ ${USE_RAY_FOR_TESTS:-} == "ray" ]]; then
+    #         docker pull "${KUBERAY_RAY_IMAGE}"
+    #     fi
+    # fi
+    # if [[ -n ${LEADERWORKERSET_VERSION:-} ]]; then
+    #     docker pull "${LEADERWORKERSET_IMAGE}"
+    # fi
 }
 
 # $1 cluster
@@ -158,35 +158,35 @@ function kind_load {
     if [ "$CREATE_KIND_CLUSTER" == 'true' ]; then
 	    cluster_kind_load "$1"
     fi
-    if [[ -n ${APPWRAPPER_VERSION:-} ]]; then
-        install_appwrapper "$1" "$2"
-    fi
-    if [[ -n ${JOBSET_VERSION:-} ]]; then
-        install_jobset "$1" "$2"
-    fi
-    if [[ -n ${KUBEFLOW_VERSION:-} ]]; then
-        # In order for MPI-operator and Training-operator to work on the same cluster it is required that:
-        # 1. 'kubeflow.org_mpijobs.yaml' is removed from base/crds/kustomization.yaml - https://github.com/kubeflow/training-operator/issues/1930
-        # 2. Training-operator deployment is modified to enable all kubeflow jobs except for mpi -  https://github.com/kubeflow/training-operator/issues/1777
-        install_kubeflow "$1" "$2"
-    fi
+    # if [[ -n ${APPWRAPPER_VERSION:-} ]]; then
+    #     install_appwrapper "$1" "$2"
+    # fi
+    # if [[ -n ${JOBSET_VERSION:-} ]]; then
+    #     install_jobset "$1" "$2"
+    # fi
+    # if [[ -n ${KUBEFLOW_VERSION:-} ]]; then
+    #     # In order for MPI-operator and Training-operator to work on the same cluster it is required that:
+    #     # 1. 'kubeflow.org_mpijobs.yaml' is removed from base/crds/kustomization.yaml - https://github.com/kubeflow/training-operator/issues/1930
+    #     # 2. Training-operator deployment is modified to enable all kubeflow jobs except for mpi -  https://github.com/kubeflow/training-operator/issues/1777
+    #     install_kubeflow "$1" "$2"
+    # fi
 
-    if [[ -n ${KUBEFLOW_TRAINER_VERSION:-} ]]; then
-        install_kubeflow_trainer "$1" "$2"
-    fi
+    # if [[ -n ${KUBEFLOW_TRAINER_VERSION:-} ]]; then
+    #     install_kubeflow_trainer "$1" "$2"
+    # fi
 
-    if [[ -n ${KUBEFLOW_MPI_VERSION:-} ]]; then
-        install_mpi "$1" "$2"
-    fi
-    if [[ -n ${LEADERWORKERSET_VERSION:-} ]]; then
-        install_lws "$1" "$2"
-    fi
-    if [[ -n ${KUBERAY_VERSION:-} ]]; then
-        install_kuberay "$1" "$2"
-    fi
-    if [[ -n ${CERTMANAGER_VERSION:-} ]]; then
-        install_cert_manager "$2"
-    fi
+    # if [[ -n ${KUBEFLOW_MPI_VERSION:-} ]]; then
+    #     install_mpi "$1" "$2"
+    # fi
+    # if [[ -n ${LEADERWORKERSET_VERSION:-} ]]; then
+    #     install_lws "$1" "$2"
+    # fi
+    # if [[ -n ${KUBERAY_VERSION:-} ]]; then
+    #     install_kuberay "$1" "$2"
+    # fi
+    # if [[ -n ${CERTMANAGER_VERSION:-} ]]; then
+    #     install_cert_manager "$2"
+    # fi
 }
 
 # $1 cluster
@@ -276,7 +276,7 @@ function build_and_apply_kueue_manifests {
     build_output=$($KUSTOMIZE build "$2")
     # shellcheck disable=SC2001 # bash parameter substitution does not work on macOS
     build_output=$(echo "$build_output" | sed "s/kueue-system/$KUEUE_NAMESPACE/g")
-    echo "$build_output" | kubectl apply --kubeconfig="$1" --server-side -f -
+    echo "$build_output" | kubectl apply --kubeconfig="$1" --server-side --force-conflicts -f -
 }
 
 # $1 cluster name

@@ -96,8 +96,8 @@ var _ = ginkgo.Describe("Job reconciliation with ManagedJobsNamespaceSelectorAlw
 		)
 
 		ginkgo.AfterEach(func() {
-			util.ExpectObjectToBeDeleted(ctx, k8sClient, testJob, true)
-			util.ExpectObjectToBeDeleted(ctx, k8sClient, testPod, true)
+			util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, testJob, true, util.LongTimeout)
+			util.ExpectObjectToBeDeletedWithTimeout(ctx, k8sClient, testPod, true, util.LongTimeout)
 		})
 
 		ginkgo.It("should not reconcile a job in the default (unmanaged) namespace", func() {

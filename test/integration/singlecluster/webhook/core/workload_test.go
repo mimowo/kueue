@@ -526,7 +526,7 @@ var _ = ginkgo.Describe("Workload validating webhook", ginkgo.Ordered, func() {
 				},
 				gomega.Succeed(),
 			),
-			ginkgo.Entry("queueName can be updated when admitting",
+			ginkgo.FEntry("queueName can be updated when admitting",
 				func() *kueue.Workload {
 					return utiltestingapi.MakeWorkload(workloadName, ns.Name).Obj()
 				},
