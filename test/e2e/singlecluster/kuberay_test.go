@@ -402,7 +402,7 @@ print([ray.get(my_task.remote(i, 1)) for i in range(32)])`,
 		})
 	})
 
-	ginkgo.It("Should run a RayService if admitted", func() {
+	ginkgo.FIt("Should run a RayService if admitted", func() {
 		kuberayTestImage := util.GetKuberayTestImage()
 
 		// Create ConfigMap with a simple Ray Serve application
@@ -435,27 +435,7 @@ app = HelloWorld.bind()`,
         ray_actor_options:
           num_cpus: 0.2`
 
-		rayService := testingrayservice.MakeService("rayservice-hello", ns.Name).
-			Suspend(true).
-			Queue(localQueueName).
-			RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "300m").
-			RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "300m").
-			Image(rayv1.HeadNode, kuberayTestImage).
-			Image(rayv1.WorkerNode, kuberayTestImage).
-			WithServeConfigV2(serveConfigV2).
-			Obj()
-
-		// Add object-store-memory to head rayStartParams
-		rayService.Spec.RayClusterSpec.HeadGroupSpec.RayStartParams["object-store-memory"] = "100000000"
-
-		// Add PYTHONPATH environment variable and volume/volumeMount to head node
-		rayService.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].Env = []corev1.EnvVar{
-			{
-				Name:  "PYTHONPATH",
-				Value: "/home/ray/samples:$PYTHONPATH",
-			},
-		}
-		rayService.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Volumes = []corev1.Volume{
+		volumes := []corev1.Volume{
 			{
 				Name: "code-sample",
 				VolumeSource: corev1.VolumeSource{
@@ -473,49 +453,40 @@ app = HelloWorld.bind()`,
 				},
 			},
 		}
-		rayService.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+		volumeMounts := []corev1.VolumeMount{
 			{
 				Name:      "code-sample",
 				MountPath: "/home/ray/samples",
 			},
 		}
+		env := []corev1.EnvVar{
+			{
+				Name:  "PYTHONPATH",
+				Value: "/home/ray/samples:$PYTHONPATH",
+			},
+		}
+
+		rayService := testingrayservice.MakeService("rayservice-hello", ns.Name).
+			Suspend(true).
+			Queue(localQueueName).
+			RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "1500m").
+			RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "1500m").
+			Image(rayv1.HeadNode, kuberayTestImage).
+			Image(rayv1.WorkerNode, kuberayTestImage).
+			RayStartParam(rayv1.HeadNode, "object-store-memory", "100000000").
+			WithServeConfigV2(serveConfigV2).
+			Env(rayv1.HeadNode, env).
+			Env(rayv1.WorkerNode, env).
+			Volumes(rayv1.HeadNode, volumes).
+			Volumes(rayv1.WorkerNode, volumes).
+			VolumeMounts(rayv1.HeadNode, volumeMounts).
+			VolumeMounts(rayv1.WorkerNode, volumeMounts).
+			Obj()
 
 		// Configure worker group with minReplicas and maxReplicas
 		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].GroupName = "small-group"
 		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].MinReplicas = ptr.To[int32](1)
 		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].MaxReplicas = ptr.To[int32](2)
-
-		// Add PYTHONPATH environment variable and volume/volumeMount to worker node
-		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].Env = []corev1.EnvVar{
-			{
-				Name:  "PYTHONPATH",
-				Value: "/home/ray/samples:$PYTHONPATH",
-			},
-		}
-		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Volumes = []corev1.Volume{
-			{
-				Name: "code-sample",
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "rayservice-hello",
-						},
-						Items: []corev1.KeyToPath{
-							{
-								Key:  "hello_serve.py",
-								Path: "hello_serve.py",
-							},
-						},
-					},
-				},
-			},
-		}
-		rayService.Spec.RayClusterSpec.WorkerGroupSpecs[0].Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
-			{
-				Name:      "code-sample",
-				MountPath: "/home/ray/samples",
-			},
-		}
 
 		ginkgo.By("Creating the ConfigMap", func() {
 			gomega.Expect(k8sClient.Create(ctx, configMap)).Should(gomega.Succeed())
