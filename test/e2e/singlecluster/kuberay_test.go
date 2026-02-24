@@ -209,6 +209,25 @@ print([ray.get(my_task.remote(i, 1)) for i in range(32)])`,
 			},
 		}
 
+		volumes := []corev1.Volume{
+			{
+				Name: "script-volume",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: "rayjob-autoscaling",
+						},
+					},
+				},
+			},
+		}
+		volumeMounts := []corev1.VolumeMount{
+			{
+				Name:      "script-volume",
+				MountPath: "/home/ray/samples",
+			},
+		}
+
 		rayJob := testingrayjob.MakeJob("rayjob-autoscaling", ns.Name).
 			Queue(localQueueName).
 			Annotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
@@ -237,31 +256,11 @@ print([ray.get(my_task.remote(i, 1)) for i in range(32)])`,
 				},
 			}).
 			Image(rayv1.HeadNode, kuberayTestImage).
-			Image(rayv1.WorkerNode, kuberayTestImage).Obj()
-
-		// Add volume and volumeMount to head node for the ConfigMap
-		rayJob.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Volumes = []corev1.Volume{
-			{
-				Name: "script-volume",
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "rayjob-autoscaling",
-						},
-					},
-				},
-			},
-		}
-		rayJob.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
-			{
-				Name:      "script-volume",
-				MountPath: "/home/ray/samples",
-			},
-		}
-		rayJob.Spec.RayClusterSpec.HeadGroupSpec.Template.Spec.TerminationGracePeriodSeconds = ptr.To(int64(5))
-		for i := range len(rayJob.Spec.RayClusterSpec.WorkerGroupSpecs) {
-			rayJob.Spec.RayClusterSpec.WorkerGroupSpecs[i].Template.Spec.TerminationGracePeriodSeconds = ptr.To(int64(5))
-		}
+			Image(rayv1.WorkerNode, kuberayTestImage).
+			Volumes(rayv1.HeadNode, volumes).
+			VolumeMounts(rayv1.HeadNode, volumeMounts).
+			TerminationGracePeriodSeconds(int64(5)).
+			Obj()
 
 		ginkgo.By("Creating the ConfigMap", func() {
 			gomega.Expect(k8sClient.Create(ctx, configMap)).Should(gomega.Succeed())
@@ -482,8 +481,8 @@ app = HelloWorld.bind()`,
 		rayService := testingrayservice.MakeService("rayservice-hello", ns.Name).
 			Suspend(true).
 			Queue(localQueueName).
-			RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "1500m").
-			RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "1500m").
+			RequestAndLimit(rayv1.HeadNode, corev1.ResourceCPU, "600m").
+			RequestAndLimit(rayv1.WorkerNode, corev1.ResourceCPU, "600m").
 			Image(rayv1.HeadNode, kuberayTestImage).
 			Image(rayv1.WorkerNode, kuberayTestImage).
 			RayStartParam(rayv1.HeadNode, "object-store-memory", "100000000").
