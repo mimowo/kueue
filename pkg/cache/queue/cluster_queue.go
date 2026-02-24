@@ -28,7 +28,6 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -366,33 +365,6 @@ func (c *ClusterQueue) forgetInflightByKey(key workload.Reference) {
 	}
 }
 
-// QueueInadmissibleWorkloads moves all workloads from inadmissibleWorkloads to heap.
-// If at least one workload is moved, returns true, otherwise returns false.
-func (c *ClusterQueue) QueueInadmissibleWorkloads(ctx context.Context, client client.Client) bool {
-	c.rwm.Lock()
-	defer c.rwm.Unlock()
-	c.queueInadmissibleCycle = c.popCycle
-	if c.inadmissibleWorkloads.empty() {
-		return false
-	}
-
-	inadmissibleWorkloads := make(map[workload.Reference]*workload.Info)
-	moved := false
-	c.inadmissibleWorkloads.forEach(func(key workload.Reference, wInfo *workload.Info) bool {
-		ns := corev1.Namespace{}
-		err := client.Get(ctx, types.NamespacedName{Name: wInfo.Obj.Namespace}, &ns)
-		if err != nil || !c.namespaceSelector.Matches(labels.Set(ns.Labels)) || !c.backoffWaitingTimeExpired(wInfo) {
-			inadmissibleWorkloads[key] = wInfo
-		} else {
-			moved = c.heap.PushIfNotPresent(wInfo) || moved
-		}
-		return true
-	})
-
-	c.inadmissibleWorkloads.replaceAll(inadmissibleWorkloads)
-	return moved
-}
-
 // PendingTotal returns the total number of pending workloads.
 func (c *ClusterQueue) PendingTotal() int {
 	active, inadmissible := c.Pending()
@@ -449,13 +421,12 @@ func (c *ClusterQueue) pendingActiveInLocalQueue(lqRef utilqueue.LocalQueueRefer
 // workloads that were already tried and are waiting for cluster conditions
 // to change to potentially become admissible.
 func (c *ClusterQueue) pendingInadmissibleInLocalQueue(lqRef utilqueue.LocalQueueReference) (inadmissible int) {
-	c.inadmissibleWorkloads.forEach(func(_ workload.Reference, wl *workload.Info) bool {
+	for _, wl := range c.inadmissibleWorkloads {
 		wlLqKey := utilqueue.KeyFromWorkload(wl.Obj)
 		if wlLqKey == lqRef {
 			inadmissible++
 		}
-		return true
-	})
+	}
 	return
 }
 
@@ -518,10 +489,10 @@ func (c *ClusterQueue) Dump() ([]workload.Reference, bool) {
 func (c *ClusterQueue) DumpInadmissible() ([]workload.Reference, bool) {
 	c.rwm.RLock()
 	defer c.rwm.RUnlock()
-	if len(c.inadmissibleWorkloads) == 0 {
+	if c.inadmissibleWorkloads.empty() {
 		return nil, false
 	}
-	elements := make([]workload.Reference, 0, len(c.inadmissibleWorkloads))
+	elements := make([]workload.Reference, 0, c.inadmissibleWorkloads.len())
 	for _, info := range c.inadmissibleWorkloads {
 		elements = append(elements, workload.Key(info.Obj))
 	}
@@ -549,7 +520,7 @@ func (c *ClusterQueue) Info(key workload.Reference) *workload.Info {
 func (c *ClusterQueue) totalElements() []*workload.Info {
 	c.rwm.RLock()
 	defer c.rwm.RUnlock()
-	totalLen := c.heap.Len() + len(c.inadmissibleWorkloads)
+	totalLen := c.heap.Len() + c.inadmissibleWorkloads.len()
 	elements := make([]*workload.Info, 0, totalLen)
 	elements = append(elements, c.heap.List()...)
 	for _, e := range c.inadmissibleWorkloads {
