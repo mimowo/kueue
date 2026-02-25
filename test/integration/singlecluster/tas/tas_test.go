@@ -185,14 +185,14 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 			gomega.Expect(k8sClient.Update(ctx, tasFlavor)).Should(gomega.HaveOccurred())
 		})
 
-		ginkgo.It("should not allow to update nodeTaints", func() {
+		ginkgo.It("should allow to update nodeTaints", func() {
 			gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(tasFlavor), tasFlavor)).To(gomega.Succeed())
 			tasFlavor.Spec.NodeTaints = []corev1.Taint{{
 				Key:    "foo",
 				Value:  "bar",
-				Effect: "Invalid",
+				Effect: corev1.TaintEffectNoSchedule,
 			}}
-			gomega.Expect(k8sClient.Update(ctx, tasFlavor)).Should(gomega.HaveOccurred())
+			gomega.Expect(k8sClient.Update(ctx, tasFlavor)).Should(gomega.Succeed())
 		})
 
 		ginkgo.It("should not allow to update tolerations", func() {
