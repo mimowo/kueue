@@ -265,9 +265,9 @@
     version: "0.15"
 - name: TASReplaceNodeOnNodeTaints
   versionedSpecs:
-  - default: false
+  - default: true
     lockToDefault: false
-    preRelease: Alpha
+    preRelease: Beta
     version: "0.17"
 - name: TASReplaceNodeOnPodTermination
   versionedSpecs:
