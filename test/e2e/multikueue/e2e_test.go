@@ -480,7 +480,7 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 				Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletion).
 				Replicas(2).
 				Size(2).
-				Request(corev1.ResourceCPU, "100m").
+				RequestAndLimit(corev1.ResourceCPU, "200m").
 				Request(corev1.ResourceMemory, "1G").
 				Queue(managerLq.Name).
 				TerminationGracePeriod(1).
@@ -562,7 +562,7 @@ var _ = ginkgo.Describe("MultiKueue", func() {
 				Image(util.GetAgnHostImage(), util.BehaviorWaitForDeletion).
 				Replicas(lwsReplicas).
 				Size(2).
-				Request(corev1.ResourceCPU, "100m").
+				RequestAndLimit(corev1.ResourceCPU, "200m").
 				Request(corev1.ResourceMemory, "600M").
 				Queue(managerLq.Name).
 				TerminationGracePeriod(1).
