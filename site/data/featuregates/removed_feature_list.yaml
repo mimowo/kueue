@@ -98,14 +98,14 @@
   stage: GA
   from: "0.14"
   to: "0.16"
-- feature: FlavorFungibilityImplicitPreferenceDefault
+- feature: TASProfileLeastFreeCapacity
   default: false
   stage: Alpha
-  from: "0.13"
-  to: "0.15"
-- feature: FlavorFungibilityImplicitPreferenceDefault
+  from: "0.10"
+  to: "0.10"
+- feature: TASProfileLeastFreeCapacity
   default: false
   stage: Deprecated
-  from: "0.15"
+  from: "0.11"
   to: "0.16"
 
