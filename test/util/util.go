@@ -93,9 +93,14 @@ var SetupLoggerGetObservedLogs = sync.OnceValue(func() *observer.ObservedLogs {
 	return observedLogs
 })
 
-func assertMsg(message string, obj client.Object) func() string {
+func assertMsg[T client.Object](message string, objs ...T) func() string {
 	return func() string {
-		return message + "\n" + format.Object(obj, 1)
+		var output strings.Builder
+		fmt.Fprintln(&output, message)
+		for _, obj := range objs {
+			fmt.Fprintln(&output, format.Object(obj, 1))
+		}
+		return output.String()
 	}
 }
 
@@ -334,17 +339,19 @@ func ExpectWorkloadsToHaveQuotaReservation(ctx context.Context, k8sClient client
 func ExpectWorkloadsToHaveQuotaReservationByKey(ctx context.Context, k8sClient client.Client, cqName string, wlKeys ...client.ObjectKey) {
 	ginkgo.GinkgoHelper()
 	wlKeys = uniqueKeys(wlKeys)
-	wl := &kueue.Workload{}
+	wlObjects := make([]*kueue.Workload, len(wlKeys))
 	gomega.Eventually(func(g gomega.Gomega) {
 		admitted := make([]client.ObjectKey, 0, len(wlKeys))
-		for _, wlKey := range wlKeys {
+		for i, wlKey := range wlKeys {
+			wl := &kueue.Workload{}
 			g.Expect(k8sClient.Get(ctx, wlKey, wl)).To(gomega.Succeed())
 			if workload.HasQuotaReservation(wl) && string(wl.Status.Admission.ClusterQueue) == cqName {
 				admitted = append(admitted, wlKey)
 			}
+			wlObjects[i] = wl
 		}
-		g.Expect(admitted).Should(gomega.Equal(wlKeys), "Unexpected workloads were admitted")
-	}, Timeout, Interval).Should(gomega.Succeed())
+		g.Expect(admitted).Should(gomega.Equal(wlKeys))
+	}, Timeout, Interval).Should(gomega.Succeed(), assertMsg("Unexpected workloads with QuotaReservation", wlObjects...))
 }
 
 func FilterEvictedWorkloads(ctx context.Context, k8sClient client.Client, wls ...*kueue.Workload) []*kueue.Workload {
