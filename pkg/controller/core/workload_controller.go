@@ -1066,8 +1066,7 @@ func (r *WorkloadReconciler) Update(e event.TypedUpdateEvent[*kueue.Workload]) b
 		// and are not supposed to actually change anything.
 		r.cache.AddOrUpdateWorkload(log, wlCopy)
 	}
-
-	r.queues.QueueSecondPassIfNeeded(ctx, e.ObjectNew, 0)
+	r.queues.QueueSecondPassIfNeeded(ctx, wlCopy, 0)
 	return true
 }
 
