@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"runtime/pprof"
 	"syscall"
+	"time"
 
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -205,7 +206,7 @@ func run() int {
 	cCache := schdcache.New(mgr.GetClient())
 
 	// setup inadmissible workload requeuer
-	requeuer := qcache.NewRequeuer()
+	requeuer := qcache.NewRequeuer(qcache.WithBatchPeriod(100 * time.Millisecond))
 	if err := mgr.Add(requeuer); err != nil {
 		log.Error(err, "Unable to add workloadRequeuer to manager")
 		return 1
