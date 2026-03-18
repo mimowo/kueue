@@ -419,14 +419,18 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 		// When the workload is evicted by scheduler we skip requeueAndUpdate.
 		// The eviction process will be finalized by the workload controller.
 		if e.status != assumed && e.status != evicted {
+			log.V(2).Info("requeueAndUpdate", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 			s.requeueAndUpdate(ctx, e)
+			log.V(2).Info("requeueAndUpdate - done", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 		} else {
 			result = metrics.AdmissionResultSuccess
 		}
 	}
 	for _, e := range inadmissibleEntries {
 		logAdmissionAttemptIfVerbose(log, &e)
+		log.V(2).Info("requeueAndUpdate", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 		s.requeueAndUpdate(ctx, e)
+		log.V(2).Info("requeueAndUpdate - done", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 	}
 
 	log.V(2).Info("Workload processing done", "duration", s.clock.Since(phaseStartTime))
@@ -724,7 +728,9 @@ func (s *Scheduler) admit(ctx context.Context, e *entry, cq *schdcache.ClusterQu
 		}
 
 		log.Error(err, errCouldNotAdmitWL)
+		log.V(2).Info("requeueAndUpdate", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 		s.requeueAndUpdate(ctx, *e)
+		log.V(2).Info("requeueAndUpdate - done", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "status", e.status)
 	})
 
 	return nil
@@ -850,6 +856,7 @@ func (s *Scheduler) requeueAndUpdate(ctx context.Context, e entry) {
 	added := s.queues.RequeueWorkload(ctx, &e.Info, e.requeueReason)
 	log.V(2).Info("Workload re-queued", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "added", added, "status", e.status)
 	if e.status == notNominated || e.status == skipped || e.status == preemptionGated {
+		log.V(2).Info("ending-start", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "added", added, "status", e.status)
 		wl := e.Obj.DeepCopy()
 		if err := workload.PatchAdmissionStatus(ctx, s.client, wl, s.clock, func(wl *kueue.Workload) (bool, error) {
 			updated := workload.UnsetQuotaReservationWithCondition(wl, "Pending", e.inadmissibleMsg, s.clock.Now())
@@ -863,6 +870,7 @@ func (s *Scheduler) requeueAndUpdate(ctx context.Context, e entry) {
 		}, workload.WithLooseOnApply(), workload.WithRetryOnConflictForPatch()); err != nil {
 			log.Error(err, "Could not update Workload status")
 		}
+		log.V(2).Info("ending-finished", "workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)), "queue", klog.KRef(e.Obj.Namespace, string(e.Obj.Spec.QueueName)), "requeueReason", e.requeueReason, "added", added, "status", e.status)
 		s.recorder.Eventf(e.Obj, corev1.EventTypeWarning, "Pending", api.TruncateEventMessage(e.inadmissibleMsg))
 	}
 }
