@@ -28,9 +28,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
@@ -51,30 +53,37 @@ import (
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/features"
+	utilclient "sigs.k8s.io/kueue/pkg/util/client"
 	utilpod "sigs.k8s.io/kueue/pkg/util/pod"
 	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/workload"
+	"sigs.k8s.io/kueue/pkg/workloadslicing"
+)
+
+const (
+	nodeMultipleFailuresEvictionMessageFormat = "Workload eviction triggered due to multiple TAS assigned node failures, including: %s"
+	reconcileBatchPeriod                      = 100 * time.Millisecond
+
+	podTerminatedByKueueConditionType    = "TerminatedByKueue"
+	podTerminatedByKueueConditionReason  = "UnschedulableOnAssignedNode"
+	podTerminatedByKueueConditionMessage = "Pod terminated by Kueue NodeFailureController due to node taint"
+	podTerminatedByKueueEventReason      = "PodTerminatedByKueue"
 )
 
 type workloadStatus int
 
 const (
-	nodeMultipleFailuresEvictionMessageFormat = "Workload eviction triggered due to multiple TAS assigned node failures, including: %s"
-	podTerminationCheckPeriod                 = 1 * time.Second
-)
-
-const (
-	// workloadHealthy indicates that the workload does not need to be evicted from the node.
+	// workloadHealthy indicates that the workload does not need to be replaced on the node.
 	// This happens if the node is healthy, or if the workload has permanent tolerations for the node's taints.
 	workloadHealthy workloadStatus = iota
 
-	// workloadUnhealthy indicates that the workload needs to be evicted from the node,
-	// and is ready for eviction (e.g. all of its pods on the node have fully terminated).
+	// workloadUnhealthy indicates that the workload needs to be replaced or evicted from the node,
+	// and is ready for it (e.g. all of its pods on the node have fully terminated).
 	workloadUnhealthy
 
-	// workloadTemporarilyHealthy indicates that the workload will need to be evicted from the node,
-	// but is not ready yet (e.g. pods are still terminating, or taints are only temporarily tolerated).
-	workloadTemporarilyHealthy
+	// workloadHealthUnknown indicates that it's impossible to determine the workload health
+	// from the node (e.g. error fetching resources).
+	workloadHealthUnknown
 )
 
 type taintToleration int
@@ -102,6 +111,12 @@ func WithWatchers(watchers ...NodeUpdateWatcher) NodeReconcilerOption {
 	}
 }
 
+// workloadHealthCheck holds the health status of a workload on a specific node and any pods that need termination.
+type workloadHealthCheck struct {
+	status          workloadStatus
+	podsToTerminate []*corev1.Pod
+}
+
 // nodeReconciler reconciles Nodes to detect failures and update affected Workloads
 type nodeReconciler struct {
 	client   client.Client
@@ -123,33 +138,53 @@ func (r *nodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	nodeExists := err == nil
 
-	affectedWorkloads, err := r.getWorkloadsOnNode(ctx, req.Name)
+	var readyCondition *corev1.NodeCondition
+	if nodeExists {
+		readyCondition = utiltas.GetNodeCondition(&node, corev1.NodeReady)
+	}
+
+	var timerExpired bool
+	if readyCondition != nil && readyCondition.Status != corev1.ConditionTrue {
+		timeSinceNotReady := r.clock.Now().Sub(readyCondition.LastTransitionTime.Time)
+		remainingTime := NodeFailureDelay - timeSinceNotReady
+		timerExpired = remainingTime <= 0
+		if !timerExpired && !features.Enabled(features.TASReplaceNodeOnPodTermination) {
+			return ctrl.Result{RequeueAfter: remainingTime}, nil
+		}
+	}
+
+	nodeSelectorPodsByWorkload, err := r.listPodsAssignedByNodeSelector(ctx, req.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	affectedWorkloads, err := r.getWorkloadsOnNode(ctx, req.Name, nodeSelectorPodsByWorkload)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	if !nodeExists {
 		log.V(3).Info("Node not found. Marking as failed immediately")
-		return ctrl.Result{}, r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+		_, err := r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+		return ctrl.Result{}, err
 	}
 
-	readyCondition := utiltas.GetNodeCondition(&node, corev1.NodeReady)
 	if readyCondition == nil {
 		log.V(3).Info("NodeReady condition is missing. Marking as failed immediately")
-		return ctrl.Result{}, r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+		_, err := r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+		return ctrl.Result{}, err
 	}
 
-	isReady := readyCondition.Status == corev1.ConditionTrue
-	if isReady || features.Enabled(features.TASReplaceNodeOnPodTermination) {
-		return r.reconcileWorkloadsOnNode(ctx, req.Name, &node, affectedWorkloads)
+	if timerExpired {
+		log.V(3).Info("Node is not ready and NodeFailureDelay timer expired, marking as failed")
+		evictedWorkloads, err := r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// Only reconcile workloads that were not evicted.
+		affectedWorkloads = affectedWorkloads.Difference(evictedWorkloads)
 	}
 
-	timeSinceNotReady := r.clock.Now().Sub(readyCondition.LastTransitionTime.Time)
-	if NodeFailureDelay > timeSinceNotReady {
-		return ctrl.Result{RequeueAfter: NodeFailureDelay - timeSinceNotReady}, nil
-	}
-	log.V(3).Info("Node is not ready and NodeFailureDelay timer expired, marking as failed")
-	return ctrl.Result{}, r.handleUnhealthyNode(ctx, req.Name, affectedWorkloads)
+	return r.reconcileWorkloadsOnNode(ctx, req.Name, &node, affectedWorkloads, nodeSelectorPodsByWorkload)
 }
 
 var _ reconcile.Reconciler = (*nodeReconciler)(nil)
@@ -192,6 +227,7 @@ func (r *nodeReconciler) Delete(e event.TypedDeleteEvent[*corev1.Node]) bool {
 
 //+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods/status,verbs=patch
 //+kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch;patch
 
 func newNodeReconciler(
@@ -221,6 +257,7 @@ func (r *nodeReconciler) notifyWatchers(oldNode, newNode *corev1.Node) {
 }
 
 func (r *nodeReconciler) SetupWithManager(mgr ctrl.Manager, cfg *config.Configuration) (string, error) {
+	podHandler := &nodeFailurePodHandler{client: r.client}
 	return TASNodeController, builder.ControllerManagedBy(mgr).
 		Named("tas_node_controller").
 		WatchesRawSource(source.TypedKind(
@@ -229,6 +266,7 @@ func (r *nodeReconciler) SetupWithManager(mgr ctrl.Manager, cfg *config.Configur
 			&handler.TypedEnqueueRequestForObject[*corev1.Node]{},
 			r,
 		)).
+		Watches(&corev1.Pod{}, podHandler).
 		WithOptions(controller.Options{
 			NeedLeaderElection:      ptr.To(false),
 			MaxConcurrentReconciles: mgr.GetControllerOptions().GroupKindConcurrency[corev1.SchemeGroupVersion.WithKind("Node").GroupKind().String()],
@@ -236,90 +274,115 @@ func (r *nodeReconciler) SetupWithManager(mgr ctrl.Manager, cfg *config.Configur
 		Complete(core.WithLeadingManager(mgr, r, &corev1.Node{}, cfg))
 }
 
+// / listPodsAssignedByNodeSelector returns a map of pods that are assigned to this node via nodeSelector, grouped by workload.
+func (r *nodeReconciler) listPodsAssignedByNodeSelector(ctx context.Context, nodeName string) (map[types.NamespacedName][]*corev1.Pod, error) {
+	var podList corev1.PodList
+	if err := r.client.List(ctx, &podList, client.MatchingFields{indexer.PodNodeSelectorHostnameKey: nodeName}); err != nil {
+		return nil, fmt.Errorf("failed to list pods for node selector %s: %w", nodeName, err)
+	}
+
+	return groupPodsByWorkload(podList.Items), nil
+}
+
+func groupPodsByWorkload(pods []corev1.Pod) map[types.NamespacedName][]*corev1.Pod {
+	result := make(map[types.NamespacedName][]*corev1.Pod)
+	for i := range pods {
+		pod := &pods[i]
+		if wlName, found := pod.Annotations[kueue.WorkloadAnnotation]; found {
+			key := types.NamespacedName{Name: wlName, Namespace: pod.Namespace}
+			result[key] = append(result[key], pod)
+		}
+	}
+	return result
+}
+
 // getWorkloadsOnNode gets all workloads that have the given node assigned in TAS topology assignment
-func (r *nodeReconciler) getWorkloadsOnNode(ctx context.Context, nodeName string) (sets.Set[types.NamespacedName], error) {
+// or have "late" pods assigned to this node via nodeSelector.
+func (r *nodeReconciler) getWorkloadsOnNode(ctx context.Context, nodeName string, nodeSelectorPodsByWorkload map[types.NamespacedName][]*corev1.Pod) (sets.Set[types.NamespacedName], error) {
 	var allWorkloads kueue.WorkloadList
 	if err := r.client.List(ctx, &allWorkloads); err != nil {
 		return nil, fmt.Errorf("failed to list workloads: %w", err)
 	}
 	tasWorkloadsOnNode := sets.New[types.NamespacedName]()
-	for _, wl := range allWorkloads.Items {
-		if hasTASAssignmentOnNode(&wl, nodeName) {
-			tasWorkloadsOnNode.Insert(types.NamespacedName{Name: wl.Name, Namespace: wl.Namespace})
+	for i := range allWorkloads.Items {
+		wl := &allWorkloads.Items[i]
+		if workload.IsFinished(wl) || workload.IsEvicted(wl) {
+			continue
+		}
+		wlKey := types.NamespacedName{Name: wl.Name, Namespace: wl.Namespace}
+		if utiltas.HasTASAssignmentOnNode(wl.Status.Admission.PodSetAssignments, nodeName) {
+			tasWorkloadsOnNode.Insert(wlKey)
+			continue
+		}
+
+		// Also find workloads from any pods that are assigned to this node by TopologyAssignment
+		// but not yet bound. These might be stale "late" pods for a workload that has already
+		// been reassigned to another node.
+		if len(nodeSelectorPodsByWorkload[wlKey]) > 0 {
+			tasWorkloadsOnNode.Insert(wlKey)
 		}
 	}
+
 	return tasWorkloadsOnNode, nil
 }
 
-func hasTASAssignmentOnNode(wl *kueue.Workload, nodeName string) bool {
-	if !workload.IsAdmittedByTAS(wl) {
-		return false
-	}
-	for _, podSetAssignment := range wl.Status.Admission.PodSetAssignments {
-		topologyAssignment := podSetAssignment.TopologyAssignment
-		if topologyAssignment == nil {
-			continue
-		}
-		if !utiltas.IsLowestLevelHostname(topologyAssignment.Levels) {
-			continue
-		}
-		for value := range utiltas.LowestLevelValues(topologyAssignment) {
-			if value == nodeName {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (r *nodeReconciler) getWorkloadStatus(ctx context.Context, nodeName string, node *corev1.Node, wlKey types.NamespacedName, wl *kueue.Workload) (workloadStatus, error) {
+func (r *nodeReconciler) getWorkloadStatus(ctx context.Context, nodeName string, node *corev1.Node, wlKey types.NamespacedName, wl *kueue.Workload, nodeSelectorAssignedPods []*corev1.Pod) (workloadHealthCheck, error) {
 	if err := r.client.Get(ctx, wlKey, wl); err != nil {
 		if apierrors.IsNotFound(err) {
-			return workloadHealthy, nil
+			return workloadHealthCheck{status: workloadHealthy}, nil
 		}
-		return workloadHealthy, err
+		return workloadHealthCheck{status: workloadHealthUnknown}, err
 	}
 
-	shouldWait := false
 	ready := utiltas.IsNodeStatusConditionTrue(node.Status.Conditions, corev1.NodeReady)
+	hasTASAssignment := utiltas.HasTASAssignmentOnNode(wl.Status.Admission.PodSetAssignments, nodeName)
 
-	if ready && features.Enabled(features.TASReplaceNodeOnNodeTaints) {
-		// Ready node, check for taints
+	switch {
+	case !hasTASAssignment:
+		// If a pod arrives late (via nodeSelector) and its node is no longer part
+		// of the topology assignment, we must always check pods
+		// to catch and fail the stray pod.
+		return r.checkPodsOnNode(ctx, nodeName, wl, false, hasTASAssignment, nodeSelectorAssignedPods)
+	case !ready:
+		if !features.Enabled(features.TASReplaceNodeOnPodTermination) {
+			return workloadHealthCheck{status: workloadUnhealthy}, nil
+		}
+		return r.checkPodsOnNode(ctx, nodeName, wl, false, hasTASAssignment, nodeSelectorAssignedPods)
+	case !features.Enabled(features.TASReplaceNodeOnNodeTaints):
+		return workloadHealthCheck{status: workloadHealthy}, nil
+	default:
 		untolerated, temporarilyTolerated := classifyNoExecuteTaints(ctx, node.Spec.Taints, workload.PodSetsOnNode(wl, nodeName))
-		switch {
-		case len(untolerated) > 0:
+
+		if len(untolerated) > 0 {
 			if !features.Enabled(features.TASReplaceNodeOnPodTermination) {
-				return workloadUnhealthy, nil
+				return workloadHealthCheck{status: workloadUnhealthy}, nil
 			}
-			shouldWait = true
-		case len(temporarilyTolerated) > 0:
-			shouldWait = true
-		default:
-			return workloadHealthy, nil
+			return r.checkPodsOnNode(ctx, nodeName, wl, true, hasTASAssignment, nodeSelectorAssignedPods)
 		}
-	} else if !ready && features.Enabled(features.TASReplaceNodeOnPodTermination) {
-		// NotReady node
-		shouldWait = true
+		if len(temporarilyTolerated) > 0 {
+			return r.checkPodsOnNode(ctx, nodeName, wl, false, hasTASAssignment, nodeSelectorAssignedPods)
+		}
+		return workloadHealthCheck{status: workloadHealthy}, nil
+	}
+}
+
+func (r *nodeReconciler) checkPodsOnNode(ctx context.Context, nodeName string, wl *kueue.Workload, hasUntoleratedTaints bool, hasTASAssignment bool, nodeSelectorAssignedPods []*corev1.Pod) (workloadHealthCheck, error) {
+	podsToTerminate, hasProgressingPods, err := r.getPodsToTerminate(ctx, wl, nodeName, nodeSelectorAssignedPods)
+	if err != nil {
+		return workloadHealthCheck{status: workloadHealthUnknown}, fmt.Errorf("failed to get pods to terminate for node %s: %w", nodeName, err)
 	}
 
-	if shouldWait {
-		var podsForWl corev1.PodList
-		if err := r.client.List(ctx, &podsForWl, client.InNamespace(wlKey.Namespace), client.MatchingFields{indexer.WorkloadNameKey: wlKey.Name}); err != nil {
-			return workloadHealthy, fmt.Errorf("failed to list pods for workload %s: %w", wlKey, err)
-		}
-		allPodsTerminated := true
-		for _, pod := range podsForWl.Items {
-			if pod.Spec.NodeName == nodeName && pod.DeletionTimestamp.IsZero() && !utilpod.IsTerminated(&pod) {
-				allPodsTerminated = false
-				break
-			}
-		}
-		if allPodsTerminated {
-			return workloadUnhealthy, nil
-		}
-		return workloadTemporarilyHealthy, nil
+	if !hasTASAssignment {
+		// This node is not part of the workload's topology assignment. If pods are assigned
+		// here (e.g., late pods with old node selectors), they are stray and must be terminated.
+		return workloadHealthCheck{status: workloadHealthy, podsToTerminate: podsToTerminate}, nil
 	}
-	return workloadHealthy, nil
+
+	if hasProgressingPods && (!hasUntoleratedTaints || features.Enabled(features.TASReplaceNodeOnPodTermination)) {
+		return workloadHealthCheck{status: workloadHealthy, podsToTerminate: podsToTerminate}, nil
+	}
+
+	return workloadHealthCheck{status: workloadUnhealthy, podsToTerminate: podsToTerminate}, nil
 }
 
 // evictWorkloadIfNeeded idempotently evicts the workload when the node has failed.
@@ -343,9 +406,12 @@ func (r *nodeReconciler) evictWorkloadIfNeeded(ctx context.Context, wl *kueue.Wo
 
 // handleUnhealthyNode finds workloads with pods on the specified node
 // and patches their status to indicate the node is to replace.
-func (r *nodeReconciler) handleUnhealthyNode(ctx context.Context, nodeName string, affectedWorkloads sets.Set[types.NamespacedName]) error {
+// It also terminates any late pods assigned to the node via nodeSelector.
+// It returns a set of workloads that were evicted during this process.
+func (r *nodeReconciler) handleUnhealthyNode(ctx context.Context, nodeName string, affectedWorkloads sets.Set[types.NamespacedName]) (sets.Set[types.NamespacedName], error) {
 	log := ctrl.LoggerFrom(ctx)
 	var workloadProcessingErrors []error
+	evictedWorkloads := sets.New[types.NamespacedName]()
 	for wlKey := range affectedWorkloads {
 		wlLog := log.WithValues("workload", klog.KRef(wlKey.Namespace, wlKey.Name))
 		var wl kueue.Workload
@@ -364,51 +430,57 @@ func (r *nodeReconciler) handleUnhealthyNode(ctx context.Context, nodeName strin
 			workloadProcessingErrors = append(workloadProcessingErrors, err)
 			continue
 		}
-		if !evictedNow && !workload.IsEvicted(&wl) {
-			if err := r.addUnhealthyNode(ctx, &wl, nodeName); err != nil {
-				wlLog.Error(err, "Failed to add node to unhealthyNodes")
-				workloadProcessingErrors = append(workloadProcessingErrors, err)
-				continue
-			}
+		if evictedNow || workload.IsEvicted(&wl) {
+			evictedWorkloads.Insert(wlKey)
+			continue
+		}
+		if err := r.addUnhealthyNode(ctx, &wl, nodeName); err != nil {
+			wlLog.Error(err, "Failed to add node to unhealthyNodes")
+			workloadProcessingErrors = append(workloadProcessingErrors, err)
+			continue
 		}
 	}
 	if len(workloadProcessingErrors) > 0 {
-		return errors.Join(workloadProcessingErrors...)
+		return evictedWorkloads, errors.Join(workloadProcessingErrors...)
 	}
-	return nil
+	return evictedWorkloads, nil
 }
 
-func (r *nodeReconciler) reconcileWorkloadsOnNode(ctx context.Context, nodeName string, node *corev1.Node, allTASWorkloads sets.Set[types.NamespacedName]) (ctrl.Result, error) {
+func (r *nodeReconciler) reconcileWorkloadsOnNode(ctx context.Context, nodeName string, node *corev1.Node, allTASWorkloads sets.Set[types.NamespacedName], nodeSelectorPodsByWorkload map[types.NamespacedName][]*corev1.Pod) (ctrl.Result, error) {
 	if allTASWorkloads.Len() == 0 {
 		return ctrl.Result{}, nil
 	}
 
 	unhealthyWorkloads := sets.New[types.NamespacedName]()
 	notUnhealthyWorkloads := sets.New[types.NamespacedName]()
-	hasWaitingWorkloads := false
+	podsToTerminateMap := make(map[types.NamespacedName][]*corev1.Pod)
 
 	for wlKey := range allTASWorkloads {
 		var wl kueue.Workload
-		status, err := r.getWorkloadStatus(ctx, nodeName, node, wlKey, &wl)
+		result, err := r.getWorkloadStatus(ctx, nodeName, node, wlKey, &wl, nodeSelectorPodsByWorkload[wlKey])
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 
-		switch status {
+		if len(result.podsToTerminate) > 0 {
+			podsToTerminateMap[wlKey] = result.podsToTerminate
+		}
+
+		switch result.status {
 		case workloadUnhealthy:
 			unhealthyWorkloads.Insert(wlKey)
-		case workloadTemporarilyHealthy:
-			hasWaitingWorkloads = true
-			notUnhealthyWorkloads.Insert(wlKey)
 		case workloadHealthy:
 			notUnhealthyWorkloads.Insert(wlKey)
 		}
 	}
 
+	evictedWorkloads := sets.New[types.NamespacedName]()
 	if len(unhealthyWorkloads) > 0 {
-		if err := r.handleUnhealthyNode(ctx, nodeName, unhealthyWorkloads); err != nil {
+		evicted, err := r.handleUnhealthyNode(ctx, nodeName, unhealthyWorkloads)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
+		evictedWorkloads = evicted
 	}
 
 	if len(notUnhealthyWorkloads) > 0 {
@@ -417,12 +489,40 @@ func (r *nodeReconciler) reconcileWorkloadsOnNode(ctx context.Context, nodeName 
 		}
 	}
 
-	result := ctrl.Result{}
-	if hasWaitingWorkloads {
-		result.RequeueAfter = podTerminationCheckPeriod
+	for wlKey, pods := range podsToTerminateMap {
+		if evictedWorkloads.Has(wlKey) {
+			continue
+		}
+		if err := r.markPodsFailed(ctx, pods); err != nil {
+			return ctrl.Result{}, fmt.Errorf("marking pods as failed: %w", err)
+		}
 	}
 
-	return result, nil
+	return ctrl.Result{}, nil
+}
+
+func (r *nodeReconciler) markPodsFailed(ctx context.Context, pods []*corev1.Pod) error {
+	for _, p := range pods {
+		err := utilclient.PatchStatus(ctx, r.client, p, func() (bool, error) {
+			p.Status.Phase = corev1.PodFailed
+			p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+				Type:               podTerminatedByKueueConditionType,
+				Status:             corev1.ConditionTrue,
+				Reason:             podTerminatedByKueueConditionReason,
+				Message:            podTerminatedByKueueConditionMessage,
+				LastTransitionTime: metav1.NewTime(r.clock.Now()),
+			})
+			return true, nil
+		})
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+		} else {
+			r.recorder.Eventf(p, corev1.EventTypeNormal, podTerminatedByKueueEventReason, podTerminatedByKueueConditionMessage)
+		}
+	}
+	return nil
 }
 
 // handleHealthyNode clears the unhealthyNodes field for each of the specified workloads.
@@ -482,7 +582,39 @@ func (r *nodeReconciler) addUnhealthyNode(ctx context.Context, wl *kueue.Workloa
 	return nil
 }
 
-func checkTaintTolerations(taint *corev1.Taint, podSets []kueue.PodSet) taintToleration {
+// getPodsToTerminate returns a list of pending pods that are assigned to the node by topology (but not yet scheduled),
+// and a boolean indicating if there is at least one pod to retain (e.g. any scheduled pod).
+func (r *nodeReconciler) getPodsToTerminate(ctx context.Context, wl *kueue.Workload, nodeName string, nodeSelectorAssignedPods []*corev1.Pod) ([]*corev1.Pod, bool, error) {
+	hasProgressingPods, err := r.hasProgressingPods(ctx, wl, nodeName)
+	if err != nil {
+		return nil, false, fmt.Errorf("list scheduled pods: %w", err)
+	}
+
+	var podsToTerminate []*corev1.Pod
+	for _, pod := range nodeSelectorAssignedPods {
+		if len(pod.Spec.NodeName) == 0 && pod.Status.Phase == corev1.PodPending && !utilpod.HasGate(pod, kueue.TopologySchedulingGate) {
+			podsToTerminate = append(podsToTerminate, pod)
+		}
+	}
+
+	return podsToTerminate, hasProgressingPods, nil
+}
+
+func (r *nodeReconciler) hasProgressingPods(ctx context.Context, wl *kueue.Workload, nodeName string) (bool, error) {
+	sliceName := workloadslicing.SliceName(wl)
+	pods, err := ListPodsForWorkloadSlice(ctx, r.client, wl.Namespace, sliceName, client.MatchingFields{
+		indexer.PodNodeNameKey: nodeName,
+	})
+	if err != nil {
+		return false, err
+	}
+	hasProgressingPods := slices.ContainsFunc(pods, func(pod *corev1.Pod) bool {
+		return pod.DeletionTimestamp.IsZero() && !utilpod.IsTerminated(pod)
+	})
+	return hasProgressingPods, nil
+}
+
+func checkTaintTolerations(logger logr.Logger, taint *corev1.Taint, podSets []kueue.PodSet) taintToleration {
 	isUntolerated := true
 	isPermanentlyTolerated := true
 
@@ -521,7 +653,7 @@ func classifyNoExecuteTaints(ctx context.Context, taints []corev1.Taint, podSets
 			continue
 		}
 
-		switch checkTaintTolerations(&taint, podSets) {
+		switch checkTaintTolerations(logger, &taint, podSets) {
 		case untoleratedTaint:
 			untolerated = append(untolerated, taint)
 		case toleratedTemporarily:
@@ -534,4 +666,52 @@ func classifyNoExecuteTaints(ctx context.Context, taints []corev1.Taint, podSets
 		logger.V(3).Info("Classified NoExecute taints", "untolerated", untolerated, "temporarilyTolerated", temporarilyTolerated)
 	}
 	return untolerated, temporarilyTolerated
+}
+
+var _ handler.EventHandler = (*nodeFailurePodHandler)(nil)
+
+type nodeFailurePodHandler struct {
+	client client.Client
+}
+
+func (h *nodeFailurePodHandler) Create(_ context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.queueReconcileForPod(e.Object, q)
+}
+
+func (h *nodeFailurePodHandler) Update(_ context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.queueReconcileForPod(e.ObjectNew, q)
+}
+
+func (h *nodeFailurePodHandler) Delete(_ context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.queueReconcileForPod(e.Object, q)
+}
+
+func (h *nodeFailurePodHandler) Generic(_ context.Context, _ event.GenericEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+}
+
+func (h *nodeFailurePodHandler) queueReconcileForPod(object client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	pod, isPod := object.(*corev1.Pod)
+	if !isPod || !utiltas.IsTAS(pod) {
+		return
+	}
+
+	// queue for potential stuck pending pods
+	if len(pod.Spec.NodeName) == 0 && pod.Spec.NodeSelector != nil && len(pod.Spec.NodeSelector[corev1.LabelHostname]) > 0 {
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name: pod.Spec.NodeSelector[corev1.LabelHostname],
+			},
+		}
+		q.AddAfter(req, reconcileBatchPeriod)
+	}
+
+	// queue pods that are failed or being deleted
+	if len(pod.Spec.NodeName) > 0 && (!pod.DeletionTimestamp.IsZero() || utilpod.IsTerminated(pod)) {
+		req := reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name: pod.Spec.NodeName,
+			},
+		}
+		q.AddAfter(req, reconcileBatchPeriod)
+	}
 }

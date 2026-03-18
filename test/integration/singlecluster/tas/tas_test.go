@@ -54,6 +54,43 @@ import (
 	"sigs.k8s.io/kueue/test/util"
 )
 
+func createPodsForWorkload(wl *kueue.Workload, nsName string, withTopologyRequestAnnotation bool, running bool) {
+	gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).To(gomega.Succeed())
+	ginkgo.By(fmt.Sprintf("creating pods (running=%v)", running), func() {
+		ta := utiltas.InternalFrom(wl.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+		idx := 0
+		for _, domain := range ta.Domains {
+			for range domain.Count {
+				podWrapper := testingpod.MakePod(fmt.Sprintf("%s-%d", wl.Name, idx), nsName).
+					Annotation(kueue.WorkloadAnnotation, wl.Name).
+					Annotation(kueue.WorkloadSliceNameAnnotation, wl.Name)
+				if withTopologyRequestAnnotation {
+					if wl.Spec.PodSets[0].TopologyRequest != nil && ptr.Deref(wl.Spec.PodSets[0].TopologyRequest.Unconstrained, false) {
+						podWrapper = podWrapper.Annotation(kueue.PodSetUnconstrainedTopologyAnnotation, "true")
+					} else {
+						podWrapper = podWrapper.Annotation(kueue.PodSetRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel)
+					}
+				}
+				if running {
+					podWrapper = podWrapper.NodeName(domain.Values[0])
+				} else {
+					// We use nodeSelector to "assign" the pod to the node by topology
+					// but leave it unscheduled (pending).
+					podWrapper = podWrapper.NodeSelector(corev1.LabelHostname, domain.Values[0])
+				}
+				pod := podWrapper.Obj()
+				util.MustCreate(ctx, k8sClient, pod)
+				phase := corev1.PodPending
+				if running {
+					phase = corev1.PodRunning
+				}
+				util.SetPodsPhase(ctx, k8sClient, phase, pod)
+				idx++
+			}
+		}
+	})
+}
+
 var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 	var (
 		ns *corev1.Namespace
@@ -2004,7 +2041,10 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 				ginkgo.By("creating a pod for the workload assigned to nodeName", func() {
 					pod = testingpod.MakePod("pod1", ns.Name).
 						Annotation(kueue.WorkloadAnnotation, "wl1").
+						Annotation(kueue.PodSetUnconstrainedTopologyAnnotation, "true").
 						NodeName(nodeName).
+						// envtest doesn't set deletion timestamp when there is no finalizer and we need it for node controller to be triggered
+						KueueFinalizer().
 						Obj()
 					util.MustCreate(ctx, k8sClient, pod)
 				})
@@ -2036,6 +2076,12 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 						g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl1), wl1)).To(gomega.Succeed())
 						g.Expect(wl1.Status.UnhealthyNodes).To(gomega.ContainElement(kueue.UnhealthyNode{Name: nodeName}))
 					}, util.Timeout, util.Interval).Should(gomega.Succeed())
+				})
+
+				ginkgo.By("remove pod finalizer to allow cleanup", func() {
+					gomega.Expect(client.IgnoreNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod))).Should(gomega.Succeed())
+					pod.Finalizers = nil
+					gomega.Expect(client.IgnoreNotFound(k8sClient.Update(ctx, pod))).Should(gomega.Succeed())
 				})
 			})
 			ginkgo.It("should selectively recover workload health based on tolerations of remaining taints", framework.SlowSpec, func() {
@@ -2195,6 +2241,95 @@ var _ = ginkgo.Describe("Topology Aware Scheduling", ginkgo.Ordered, func() {
 						g.Expect([]string{assignedNode1, assignedNode2}).NotTo(gomega.ContainElement(nodeName))
 						g.Expect(wl1.Status.UnhealthyNodes).NotTo(gomega.ContainElement(kueue.UnhealthyNode{Name: nodeName}))
 					}, util.Timeout, util.Interval).Should(gomega.Succeed())
+				})
+			})
+
+			ginkgo.It("should catch and terminate a late pod assigned to a replaced node", framework.SlowSpec, func() {
+				features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.TASReplaceNodeOnNodeTaints, true)
+
+				var wl1 *kueue.Workload
+				nodeName := "x3"
+				taint := corev1.Taint{Key: "example.com/failure", Value: "true", Effect: corev1.TaintEffectNoExecute}
+
+				ginkgo.By("creating a workload", func() {
+					wl1 = utiltestingapi.MakeWorkload("wl1", ns.Name).
+						PodSets(*utiltestingapi.MakePodSet("worker", 2).
+							PreferredTopologyRequest(utiltesting.DefaultBlockTopologyLevel).
+							Obj()).
+						Queue(kueue.LocalQueueName(localQueue.Name)).Request(corev1.ResourceCPU, "1").Obj()
+					util.MustCreate(ctx, k8sClient, wl1)
+				})
+
+				ginkgo.By("verify the workload is admitted", func() {
+					util.ExpectWorkloadsToBeAdmitted(ctx, k8sClient, wl1)
+					gomega.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl1), wl1)).To(gomega.Succeed())
+					ta := utiltas.InternalFrom(wl1.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+					gomega.Expect(ta.Domains).To(gomega.HaveLen(2))
+					nodeName = ta.Domains[0].Values[0]
+				})
+
+				// We must clear the NodeName to ensure the pods are treated as truly Pending (unscheduled)
+				// rather than running/scheduled pods in Pending phase.
+				createPodsForWorkload(wl1, ns.Name, false, false)
+
+				ginkgo.By("applying NoExecute taint to the first node", func() {
+					nodeToUpdate := &corev1.Node{}
+					gomega.Expect(k8sClient.Get(ctx, apitypes.NamespacedName{Name: nodeName}, nodeToUpdate)).Should(gomega.Succeed())
+					nodeToUpdate.Spec.Taints = append(nodeToUpdate.Spec.Taints, taint)
+					gomega.Expect(k8sClient.Update(ctx, nodeToUpdate)).Should(gomega.Succeed())
+				})
+
+				ginkgo.By("verify that originally scheduled pods are automatically marked as Failed by Kueue", func() {
+					gomega.Eventually(func(g gomega.Gomega) {
+						var pods corev1.PodList
+						g.Expect(k8sClient.List(ctx, &pods, client.InNamespace(ns.Name), client.MatchingLabels{kueue.WorkloadAnnotation: wl1.Name})).Should(gomega.Succeed())
+						for _, pod := range pods.Items {
+							g.Expect(pod.Status.Phase).To(gomega.Equal(corev1.PodFailed))
+							g.Expect(pod.Status.Conditions).To(gomega.ContainElement(gomega.BeComparableTo(corev1.PodCondition{
+								Type:   "TerminatedByKueue",
+								Status: corev1.ConditionTrue,
+							}, cmpopts.IgnoreFields(corev1.PodCondition{}, "LastTransitionTime", "Message", "LastProbeTime", "Reason"))))
+						}
+					}, util.Timeout, util.Interval).Should(gomega.Succeed())
+				})
+
+				ginkgo.By("verify that workload is rescheduled using a free node in the same block", func() {
+					gomega.Eventually(func(g gomega.Gomega) {
+						g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl1), wl1)).To(gomega.Succeed())
+						ta := utiltas.InternalFrom(wl1.Status.Admission.PodSetAssignments[0].TopologyAssignment)
+						g.Expect(ta.Domains).To(gomega.HaveLen(2))
+						assignedNode1 := ta.Domains[0].Values[0]
+						assignedNode2 := ta.Domains[1].Values[0]
+						g.Expect([]string{assignedNode1, assignedNode2}).NotTo(gomega.ContainElement(nodeName))
+						g.Expect(wl1.Status.UnhealthyNodes).NotTo(gomega.ContainElement(kueue.UnhealthyNode{Name: nodeName}))
+					}, util.Timeout, util.Interval).Should(gomega.Succeed())
+				})
+
+				var latePod *corev1.Pod
+				ginkgo.By("simulating a late pod mapped to the old failed node by its nodeSelector", func() {
+					latePod = testingpod.MakePod(fmt.Sprintf("%s-late-arriving", wl1.Name), ns.Name).
+						Annotation(kueue.WorkloadAnnotation, wl1.Name).
+						Annotation(kueue.PodSetRequiredTopologyAnnotation, utiltesting.DefaultBlockTopologyLevel).
+						Annotation(kueue.WorkloadSliceNameAnnotation, wl1.Name).
+						NodeSelector(corev1.LabelHostname, nodeName).
+						Obj()
+					util.MustCreate(ctx, k8sClient, latePod)
+
+					// The controller only listens to Pending pods
+					latePod.Status.Phase = corev1.PodPending
+					gomega.Expect(k8sClient.Status().Update(ctx, latePod)).Should(gomega.Succeed())
+				})
+
+				ginkgo.By("verify that the controller catches and fails the late pod", func() {
+					gomega.Eventually(func(g gomega.Gomega) {
+						updatedPod := &corev1.Pod{}
+						g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(latePod), updatedPod)).To(gomega.Succeed())
+						g.Expect(updatedPod.Status.Phase).To(gomega.Equal(corev1.PodFailed))
+						g.Expect(updatedPod.Status.Conditions).To(gomega.ContainElement(gomega.BeComparableTo(corev1.PodCondition{
+							Type:   "TerminatedByKueue",
+							Status: corev1.ConditionTrue,
+						}, cmpopts.IgnoreFields(corev1.PodCondition{}, "LastTransitionTime", "Message", "LastProbeTime", "Reason"))))
+					}, util.LongTimeout, util.Interval).Should(gomega.Succeed())
 				})
 			})
 
