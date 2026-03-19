@@ -91,12 +91,15 @@ type WLEvent struct {
 	Admitted  bool
 	Evicted   bool
 	Finished  bool
+
+	WLCreationTime time.Time
 }
 
 type WLState struct {
 	ID int
 	types.NamespacedName
 	ClassName        string
+	CreationTime     time.Time
 	FirstEventTime   time.Time
 	TimeToAdmitMs    int64
 	TimeToFinishedMs int64
@@ -188,13 +191,14 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 			NamespacedName: ev.NamespacedName,
 			ClassName:      ev.ClassName,
 			FirstEventTime: ev.Time,
+			CreationTime:   ev.WLCreationTime,
 			LastEvent:      &WLEvent{},
 		}
 		r.Store.WL[ev.UID] = state
 	}
 
 	if ev.Admitted && !state.LastEvent.Admitted {
-		state.TimeToAdmitMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToAdmitMs = ev.Time.Sub(state.CreationTime).Milliseconds()
 	}
 
 	if ev.Evicted && !state.LastEvent.Evicted {
@@ -202,7 +206,7 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 	}
 
 	if ev.Finished && !state.LastEvent.Finished {
-		state.TimeToFinishedMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToFinishedMs = ev.Time.Sub(state.CreationTime).Milliseconds()
 	}
 
 	state.LastEvent = ev
@@ -460,6 +464,8 @@ func (r *Recorder) RecordWorkloadState(wl *kueue.Workload) {
 		Admitted:  workload.IsAdmitted(wl),
 		Evicted:   workload.IsEvicted(wl),
 		Finished:  workload.IsFinished(wl),
+
+		WLCreationTime: wl.CreationTimestamp.Time,
 	}
 	select {
 	case r.wlEvChan <- ev:
