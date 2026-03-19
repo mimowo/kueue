@@ -273,7 +273,7 @@ func TestPushOrUpdateGenerationChanged(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			ctx, _ := utiltesting.ContextWithLog(t)
+			ctx, log := utiltesting.ContextWithLog(t)
 			cq := newClusterQueueImpl(ctx, nil, defaultOrdering, testingclock.NewFakeClock(now))
 
 			wl := utiltestingapi.MakeWorkload("workload-1", defaultNamespace).
@@ -288,7 +288,7 @@ func TestPushOrUpdateGenerationChanged(t *testing.T) {
 			// Simulate RequeueWorkload with info.Update: inadmissible entry gets new generation.
 			updatedInfo := workload.NewInfo(tc.updatedWorkload)
 			updatedInfo.LastEvaluatedGeneration = head.LastEvaluatedGeneration
-			cq.requeueIfNotPresent(updatedInfo, false)
+			cq.requeueIfNotPresent(log, updatedInfo, false)
 
 			// PushOrUpdate from informer event with the updated workload.
 			cq.PushOrUpdate(workload.NewInfo(tc.updatedWorkload))
@@ -393,14 +393,14 @@ func TestSnapshotDeterministicOrder(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			ctx, _ := utiltesting.ContextWithLog(t)
+			ctx, log := utiltesting.ContextWithLog(t)
 			cq := newClusterQueueImpl(ctx, nil, defaultOrdering, testingclock.NewFakeClock(now))
 
 			for _, w := range tc.workloads {
 				cq.PushOrUpdate(workload.NewInfo(w))
 			}
 			for _, w := range tc.inadmissibleWorkloads {
-				cq.requeueIfNotPresent(workload.NewInfo(w), false)
+				cq.requeueIfNotPresent(log, workload.NewInfo(w), false)
 			}
 
 			firstSnap := cq.Snapshot()
@@ -498,7 +498,7 @@ func Test_DeleteFromLocalQueue(t *testing.T) {
 
 	for _, w := range inadmissibleWorkloads {
 		wInfo := workload.NewInfo(w)
-		cq.requeueIfNotPresent(wInfo, false)
+		cq.requeueIfNotPresent(log, wInfo, false)
 		qImpl.AddOrUpdate(wInfo)
 	}
 
@@ -685,10 +685,10 @@ func TestClusterQueueImpl(t *testing.T) {
 			}
 
 			for _, w := range test.inadmissibleWorkloadsToRequeue {
-				cq.requeueIfNotPresent(w, false)
+				cq.requeueIfNotPresent(log, w, false)
 			}
 			for _, w := range test.admissibleWorkloadsToRequeue {
-				cq.requeueIfNotPresent(w, true)
+				cq.requeueIfNotPresent(log, w, true)
 			}
 
 			for _, w := range test.workloadsToUpdate {
@@ -718,7 +718,7 @@ func TestClusterQueueImpl(t *testing.T) {
 }
 
 func TestQueueInadmissibleWorkloadsDuringScheduling(t *testing.T) {
-	ctx, _ := utiltesting.ContextWithLog(t)
+	ctx, log := utiltesting.ContextWithLog(t)
 	cq := newClusterQueueImpl(ctx, nil, defaultOrdering, testingclock.NewFakeClock(time.Now()))
 	cq.namespaceSelector = labels.Everything()
 	wl := utiltestingapi.MakeWorkload("workload-1", defaultNamespace).Obj()
@@ -735,7 +735,7 @@ func TestQueueInadmissibleWorkloadsDuringScheduling(t *testing.T) {
 	// Simulate requeuing during scheduling attempt.
 	head := cq.Pop()
 	queueInadmissibleWorkloads(ctx, cq, cl)
-	cq.requeueIfNotPresent(head, false)
+	cq.requeueIfNotPresent(log, head, false)
 
 	activeWorkloads, _ = cq.Dump()
 	wantActiveWorkloads = []workload.Reference{workload.Key(wl)}
@@ -745,7 +745,7 @@ func TestQueueInadmissibleWorkloadsDuringScheduling(t *testing.T) {
 
 	// Simulating scheduling again without requeuing.
 	head = cq.Pop()
-	cq.requeueIfNotPresent(head, false)
+	cq.requeueIfNotPresent(log, head, false)
 	activeWorkloads, _ = cq.Dump()
 	wantActiveWorkloads = nil
 	if diff := cmp.Diff(wantActiveWorkloads, activeWorkloads, cmpDump...); diff != "" {
