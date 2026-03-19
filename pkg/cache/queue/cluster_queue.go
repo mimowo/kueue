@@ -38,6 +38,7 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/cache/hierarchy"
 	queueafs "sigs.k8s.io/kueue/pkg/cache/queue/afs"
+	"sigs.k8s.io/kueue/pkg/features"
 	afs "sigs.k8s.io/kueue/pkg/util/admissionfairsharing"
 	"sigs.k8s.io/kueue/pkg/util/heap"
 	utilpriority "sigs.k8s.io/kueue/pkg/util/priority"
@@ -361,7 +362,7 @@ func (c *ClusterQueue) DeleteFromLocalQueue(log logr.Logger, q *LocalQueue) {
 // or if there was a call to QueueInadmissibleWorkloads after a call to Pop,
 // the workload will be pushed back to heap directly. Otherwise, the workload
 // will be put into the inadmissibleWorkloads.
-func (c *ClusterQueue) requeueIfNotPresent(wInfo *workload.Info, immediate bool) bool {
+func (c *ClusterQueue) requeueIfNotPresent(log logr.Logger, wInfo *workload.Info, immediate bool) bool {
 	c.rwm.Lock()
 	defer c.rwm.Unlock()
 	key := workload.Key(wInfo.Obj)
@@ -389,6 +390,12 @@ func (c *ClusterQueue) requeueIfNotPresent(wInfo *workload.Info, immediate bool)
 
 	c.inadmissibleWorkloads.insert(key, wInfo)
 
+	if features.Enabled(features.SchedulingEquivalenceHashing) && wInfo.SchedulingHash != workload.SchedulingHashUnknown && !immediate {
+		if moved := c.handleInadmissibleHash(wInfo.SchedulingHash); moved > 0 {
+			log.V(2).Info("Bulk-moved equivalent workloads to inadmissible", "hash", wInfo.SchedulingHash, "movedCount", moved)
+		}
+	}
+
 	return true
 }
 
@@ -403,8 +410,6 @@ func (c *ClusterQueue) forgetInflightByKey(key workload.Reference) {
 // Only applies to BestEffortFIFO queues; in StrictFIFO the head workload
 // stays in the heap and must not cause equivalent workloads to be skipped.
 func (c *ClusterQueue) handleInadmissibleHash(hash string) int {
-	c.rwm.Lock()
-	defer c.rwm.Unlock()
 	if c.queueingStrategy != kueue.BestEffortFIFO {
 		return 0
 	}
@@ -672,34 +677,33 @@ func (c *ClusterQueue) Active() bool {
 }
 
 // RequeueIfNotPresent inserts a workload that was not
-// admitted back into the ClusterQueue. If the boolean is true,
-// the workloads should be put back in the queue immediately,
-// because we couldn't determine if the workload was admissible
-// in the last cycle. If the boolean is false, the implementation might
-// choose to keep it in temporary placeholder stage where it doesn't
-// compete with other workloads, until cluster events free up quota.
+// admitted back into the ClusterQueue.
+// This may be done either "immediately" or "non-immediately";
+// in the latter case the implementation may choose to keep the workload in "inadmissible workloads"
+// where it doesn't compete with other workloads, until cluster events free up quota.
 // The workload should not be reinserted if it's already in the ClusterQueue.
 // Returns true if the workload was inserted.
 func (c *ClusterQueue) RequeueIfNotPresent(ctx context.Context, wInfo *workload.Info, reason RequeueReason) bool {
 	// when preemptions are in-progress, we keep attempting to
 	// schedule the same workload for BestEffortFIFO queues. See
 	// documentation of stickyWorkload for more details
+	log := ctrl.LoggerFrom(ctx)
 	if reason == RequeueReasonPendingPreemption && c.queueingStrategy == kueue.BestEffortFIFO {
-		log := ctrl.LoggerFrom(ctx)
 		if logV := log.V(5); logV.Enabled() {
 			logV.Info("Setting sticky workload", "clusterQueue", wInfo.ClusterQueue, "workload", workload.Key(wInfo.Obj))
 		}
 		c.sw.set(workload.Key(wInfo.Obj))
 	}
 
+	var immediate bool
 	if c.queueingStrategy == kueue.StrictFIFO {
-		return c.requeueIfNotPresent(wInfo, reason != RequeueReasonNamespaceMismatch)
-	}
-	return c.requeueIfNotPresent(
-		wInfo,
-		reason == RequeueReasonFailedAfterNomination ||
+		immediate = reason != RequeueReasonNamespaceMismatch
+	} else {
+		immediate = reason == RequeueReasonFailedAfterNomination ||
 			reason == RequeueReasonPendingPreemption ||
-			reason == RequeueReasonPreemptionFailed)
+			reason == RequeueReasonPreemptionFailed
+	}
+	return c.requeueIfNotPresent(log, wInfo, immediate)
 }
 
 // baseCompareFunc orders workloads by sticky status, priority, timestamp, and UID.
