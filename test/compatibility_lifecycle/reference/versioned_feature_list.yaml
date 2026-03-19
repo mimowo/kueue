@@ -225,7 +225,7 @@
     version: "0.15"
 - name: SchedulingEquivalenceHashing
   versionedSpecs:
-  - default: true
+  - default: false
     lockToDefault: false
     preRelease: Beta
     version: "0.15"
