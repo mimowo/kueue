@@ -1929,9 +1929,10 @@ func TestWorkloadPriorityClassChanged(t *testing.T) {
 
 func TestSchedulingHash(t *testing.T) {
 	cases := map[string]struct {
-		wl1      *kueue.Workload
-		wl2      *kueue.Workload
-		wantSame bool
+		wl1          *kueue.Workload
+		wl2          *kueue.Workload
+		wantSame     bool
+		featureGates map[featuregate.Feature]bool
 	}{
 		"same spec different identity produces same hash": {
 			wl1: utiltestingapi.MakeWorkload("wl1", "ns1").
@@ -1940,14 +1941,16 @@ func TestSchedulingHash(t *testing.T) {
 			wl2: utiltestingapi.MakeWorkload("wl2", "ns2").
 				Request(corev1.ResourceCPU, "2").
 				Request(corev1.ResourceMemory, "1Gi").Obj(),
-			wantSame: true,
+			wantSame:     true,
+			featureGates: map[featuregate.Feature]bool{features.SchedulingEquivalenceHashing: true},
 		},
 		"different resource requests": {
 			wl1: utiltestingapi.MakeWorkload("wl1", "ns").
 				Request(corev1.ResourceCPU, "1").Obj(),
 			wl2: utiltestingapi.MakeWorkload("wl2", "ns").
 				Request(corev1.ResourceCPU, "2").Obj(),
-			wantSame: false,
+			wantSame:     false,
+			featureGates: map[featuregate.Feature]bool{features.SchedulingEquivalenceHashing: true},
 		},
 		"different pod counts": {
 			wl1: utiltestingapi.MakeWorkload("wl1", "ns").
@@ -1956,7 +1959,8 @@ func TestSchedulingHash(t *testing.T) {
 			wl2: utiltestingapi.MakeWorkload("wl2", "ns").
 				PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 5).
 					Request(corev1.ResourceCPU, "1").Obj()).Obj(),
-			wantSame: false,
+			wantSame:     false,
+			featureGates: map[featuregate.Feature]bool{features.SchedulingEquivalenceHashing: true},
 		},
 		"different workload priorities": {
 			wl1: utiltestingapi.MakeWorkload("wl1", "ns").
@@ -1965,11 +1969,15 @@ func TestSchedulingHash(t *testing.T) {
 			wl2: utiltestingapi.MakeWorkload("wl2", "ns").
 				Priority(200).
 				Request(corev1.ResourceCPU, "1").Obj(),
-			wantSame: false,
+			wantSame:     false,
+			featureGates: map[featuregate.Feature]bool{features.SchedulingEquivalenceHashing: true},
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			for fg, enable := range tc.featureGates {
+				features.SetFeatureGateDuringTest(t, fg, enable)
+			}
 			info1 := NewInfo(tc.wl1)
 			info1.UpdateSchedulingHash(logr.Discard())
 			info2 := NewInfo(tc.wl2)
