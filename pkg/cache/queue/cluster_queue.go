@@ -414,7 +414,7 @@ func (c *ClusterQueue) requeueIfNotPresent(log logr.Logger, wInfo *workload.Info
 	log.V(2).Info(logMsg, "clusterQueue", c.name, "workload", key)
 
 	if features.Enabled(features.SchedulingEquivalenceHashing) && wInfo.SchedulingHash != workload.SchedulingHashUnknown && !immediate {
-		if moved := c.handleInadmissibleHash(wInfo.SchedulingHash); moved > 0 {
+		if moved := c.handleInadmissibleHash(wInfo.SchedulingHash); moved.Len() > 0 {
 			log.V(2).Info("Bulk-moved equivalent workloads to inadmissible", "hash", wInfo.SchedulingHash, "movedCount", moved)
 		}
 	}
@@ -432,18 +432,18 @@ func (c *ClusterQueue) forgetInflightByKey(key workload.Reference) {
 // scheduling hash to inadmissibleWorkloads. Returns the number moved.
 // Only applies to BestEffortFIFO queues; in StrictFIFO the head workload
 // stays in the heap and must not cause equivalent workloads to be skipped.
-func (c *ClusterQueue) handleInadmissibleHash(hash string) int {
+func (c *ClusterQueue) handleInadmissibleHash(hash string) sets.Set[string] {
 	if c.queueingStrategy != kueue.BestEffortFIFO {
-		return 0
+		return sets.New[string]()
 	}
 	c.noFitSchedulingHashes.Insert(hash)
-	moved := 0
+	moved := sets.New[string]()
 	for _, wInfo := range c.heap.List() {
 		if wInfo.SchedulingHash == hash {
 			key := workloadKey(wInfo)
 			c.heap.Delete(key)
 			c.inadmissibleWorkloads.insert(key, wInfo)
-			moved++
+			moved.Insert(string(key))
 		}
 	}
 	return moved

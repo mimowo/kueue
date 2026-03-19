@@ -177,20 +177,20 @@ func queueInadmissibleWorkloads(ctx context.Context, c *ClusterQueue, client cli
 	}
 	log.V(2).Info("Resetting the head of the ClusterQueue", "clusterQueue", c.name)
 	newInadmissibleWorkloads := make(inadmissibleWorkloads)
-	moved := 0
+	moved := sets.New[string]()
 	for key, wInfo := range c.inadmissibleWorkloads {
 		ns := corev1.Namespace{}
 		err := client.Get(ctx, types.NamespacedName{Name: wInfo.Obj.Namespace}, &ns)
 		if err != nil || !c.namespaceSelector.Matches(labels.Set(ns.Labels)) || !c.backoffWaitingTimeExpired(wInfo) {
 			newInadmissibleWorkloads.insert(key, wInfo)
 		} else if c.heap.PushIfNotPresent(wInfo) {
-			moved++
+			moved.Insert(string(key))
 		}
 	}
 
 	c.inadmissibleWorkloads.replaceAll(newInadmissibleWorkloads)
-	log.V(5).Info("Moved workloads from inadmissibleWorkloads back to heap", "clusterQueue", c.name, "workloadsMoved", moved, "workloadsNotMoved", len(c.inadmissibleWorkloads))
-	return moved
+	log.V(2).Info("Moved workloads from inadmissibleWorkloads back to heap", "clusterQueue", c.name, "workloadsMoved", moved, "workloadsNotMoved", len(c.inadmissibleWorkloads))
+	return moved.Len()
 }
 
 // NotifyRetryInadmissible requests that inadmissible workloads

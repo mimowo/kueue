@@ -27,6 +27,7 @@ import (
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/yaml"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
@@ -91,6 +92,8 @@ type WLEvent struct {
 	Admitted  bool
 	Evicted   bool
 	Finished  bool
+
+	CreationTime time.Time
 }
 
 type WLState struct {
@@ -98,6 +101,7 @@ type WLState struct {
 	types.NamespacedName
 	ClassName        string
 	FirstEventTime   time.Time
+	CreationTime     time.Time
 	TimeToAdmitMs    int64
 	TimeToFinishedMs int64
 	EvictionCount    int32
@@ -188,13 +192,19 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 			NamespacedName: ev.NamespacedName,
 			ClassName:      ev.ClassName,
 			FirstEventTime: ev.Time,
+			CreationTime:   ev.CreationTime,
 			LastEvent:      &WLEvent{},
 		}
 		r.Store.WL[ev.UID] = state
 	}
 
 	if ev.Admitted && !state.LastEvent.Admitted {
-		state.TimeToAdmitMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		timeBeforeMs := ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToAdmitMs = ev.Time.Sub(state.CreationTime).Milliseconds()
+		if timeBeforeMs > state.TimeToAdmitMs {
+			klog.InfoS("MYDEBUG", "timeBeforeMs", timeBeforeMs, "TimeToAdmitMs", state.TimeToAdmitMs)
+			os.Exit(1)
+		}
 	}
 
 	if ev.Evicted && !state.LastEvent.Evicted {
@@ -202,7 +212,7 @@ func (r *Recorder) recordWLEvent(ev *WLEvent) {
 	}
 
 	if ev.Finished && !state.LastEvent.Finished {
-		state.TimeToFinishedMs = ev.Time.Sub(state.FirstEventTime).Milliseconds()
+		state.TimeToFinishedMs = ev.Time.Sub(state.CreationTime).Milliseconds()
 	}
 
 	state.LastEvent = ev
@@ -460,6 +470,8 @@ func (r *Recorder) RecordWorkloadState(wl *kueue.Workload) {
 		Admitted:  workload.IsAdmitted(wl),
 		Evicted:   workload.IsEvicted(wl),
 		Finished:  workload.IsFinished(wl),
+
+		CreationTime: wl.CreationTimestamp.Time,
 	}
 	select {
 	case r.wlEvChan <- ev:

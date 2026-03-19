@@ -1350,7 +1350,7 @@ func TestRecordInadmissibleHash(t *testing.T) {
 			}
 
 			moved := cq.handleInadmissibleHash(tc.hashToRecord)
-			if moved != tc.wantMoved {
+			if moved.Len() != tc.wantMoved {
 				t.Errorf("handleInadmissibleHash moved %d, want %d", moved, tc.wantMoved)
 			}
 

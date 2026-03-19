@@ -610,7 +610,7 @@ func (m *Manager) HandleInadmissibleHash(cqName kueue.ClusterQueueReference, has
 	if cq == nil {
 		return 0
 	}
-	moved := cq.handleInadmissibleHash(hash)
+	moved := cq.handleInadmissibleHash(hash).Len()
 	if moved > 0 {
 		// Update pending metrics for the CQ and all its LocalQueues.
 		reportPendingWorkloads(m, cqName)
