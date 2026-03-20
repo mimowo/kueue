@@ -299,26 +299,30 @@ func groupPodsByWorkload(pods []corev1.Pod) map[types.NamespacedName][]*corev1.P
 // getWorkloadsOnNode gets all workloads that have the given node assigned in TAS topology assignment
 // or have "late" pods assigned to this node via nodeSelector.
 func (r *nodeReconciler) getWorkloadsOnNode(ctx context.Context, nodeName string, nodeSelectorPodsByWorkload map[types.NamespacedName][]*corev1.Pod) (sets.Set[types.NamespacedName], error) {
-	var allWorkloads kueue.WorkloadList
-	if err := r.client.List(ctx, &allWorkloads); err != nil {
+	var workloadsOnNode kueue.WorkloadList
+	if err := r.client.List(ctx, &workloadsOnNode, client.MatchingFields{indexer.AdmittedWorkloadNodesKey: nodeName}); err != nil {
 		return nil, fmt.Errorf("failed to list workloads: %w", err)
 	}
 	tasWorkloadsOnNode := sets.New[types.NamespacedName]()
-	for i := range allWorkloads.Items {
-		wl := &allWorkloads.Items[i]
-		if workload.IsFinished(wl) || workload.IsEvicted(wl) {
-			continue
-		}
-		wlKey := types.NamespacedName{Name: wl.Name, Namespace: wl.Namespace}
-		if wl.Status.Admission != nil && utiltas.HasTASAssignmentOnNode(wl.Status.Admission.PodSetAssignments, nodeName) {
-			tasWorkloadsOnNode.Insert(wlKey)
-			continue
-		}
+	for i := range workloadsOnNode.Items {
+		wl := &workloadsOnNode.Items[i]
+		tasWorkloadsOnNode.Insert(types.NamespacedName{Name: wl.Name, Namespace: wl.Namespace})
+	}
 
-		// Also find workloads from any pods that are assigned to this node by TopologyAssignment
-		// but not yet bound. These might be stale "late" pods for a workload that has already
-		// been reassigned to another node.
-		if len(nodeSelectorPodsByWorkload[wlKey]) > 0 {
+	logger := ctrl.LoggerFrom(ctx).WithValues("node", nodeName)
+	// Also find workloads from any pods that are assigned to this node by TopologyAssignment
+	// but not yet bound. These might be stale "late" pods for a workload that has already
+	// been reassigned to another node.
+	for wlKey := range nodeSelectorPodsByWorkload {
+		if tasWorkloadsOnNode.Has(wlKey) {
+			continue
+		}
+		var wl kueue.Workload
+		if err := r.client.Get(ctx, wlKey, &wl); err != nil {
+			logger.V(4).Info("Failed to get workload", "workload", wlKey, "error", err)
+			continue
+		}
+		if !workload.IsFinished(&wl) && !workload.IsEvicted(&wl) {
 			tasWorkloadsOnNode.Insert(wlKey)
 		}
 	}

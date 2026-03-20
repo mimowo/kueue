@@ -51,6 +51,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 	testStartTime := time.Now().Truncate(time.Second)
 	nodeName := "test-node-name"
 	nodeName2 := "test-node-name-2"
+	nodeNameUnassigned := "unassigned-node"
 	wlName := "test-workload"
 	nsName := "default"
 	fakeClock := testingclock.NewFakeClock(testStartTime)
@@ -134,9 +135,22 @@ func TestNodeFailureReconciler(t *testing.T) {
 		StatusPhase(corev1.PodPending).
 		Obj()
 
+	strayPod := testingpod.MakePod("stray-pod", nsName).
+		Annotation(kueue.WorkloadAnnotation, wlName).
+		Annotation(kueue.PodSetUnconstrainedTopologyAnnotation, "true").
+		NodeSelector(corev1.LabelHostname, nodeNameUnassigned).
+		StatusPhase(corev1.PodPending).
+		Obj()
+
 	terminatingPod := basePod.DeepCopy()
 	terminatingPod.DeletionTimestamp = &now
 	terminatingPod.Finalizers = []string{podconstants.PodFinalizer}
+
+	finishedWorkload := baseWorkload.DeepCopy()
+	apimeta.SetStatusCondition(&finishedWorkload.Status.Conditions, metav1.Condition{Type: kueue.WorkloadFinished, Status: metav1.ConditionTrue, Reason: "Finished"})
+
+	evictedWorkload := baseWorkload.DeepCopy()
+	apimeta.SetStatusCondition(&evictedWorkload.Status.Conditions, metav1.Condition{Type: kueue.WorkloadEvicted, Status: metav1.ConditionTrue, Reason: "Evicted"})
 
 	failedPod := basePod.DeepCopy()
 	failedPod.Status.Phase = corev1.PodFailed
@@ -149,6 +163,7 @@ func TestNodeFailureReconciler(t *testing.T) {
 	}
 
 	baseNode := testingnode.MakeNode(nodeName)
+	unassignedNode := testingnode.MakeNode(nodeNameUnassigned)
 
 	tests := map[string]struct {
 		initObjs           []client.Object
@@ -830,6 +845,48 @@ func TestNodeFailureReconciler(t *testing.T) {
 			featureGates: map[featuregate.Feature]bool{
 				features.TASReplaceNodeOnNodeTaints:     true,
 				features.TASReplaceNodeOnPodTermination: true,
+			},
+		},
+		"Node NotReady, workload missing TAS assignment but has late pod -> Workload marked Healthy, pod patched": {
+			initObjs: []client.Object{
+				unassignedNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: now}).Obj(),
+				baseWorkload.DeepCopy(),
+				strayPod.DeepCopy(),
+			},
+			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeNameUnassigned}}},
+			wantUnhealthyNodes: nil,
+			wantPatchedPods:    []string{"stray-pod"},
+		},
+		"Node NotReady, finished workload on TAS node -> ignored": {
+			initObjs: []client.Object{
+				baseNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: earlierTime}).Obj(),
+				finishedWorkload.DeepCopy(),
+				basePod.DeepCopy(),
+			},
+			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
+			wantUnhealthyNodes: nil,
+		},
+		"Node NotReady, evicted workload on TAS node -> ignored": {
+			initObjs: []client.Object{
+				baseNode.Clone().StatusConditions(corev1.NodeCondition{
+					Type:               corev1.NodeReady,
+					Status:             corev1.ConditionFalse,
+					LastTransitionTime: earlierTime}).Obj(),
+				evictedWorkload.DeepCopy(),
+				basePod.DeepCopy(),
+			},
+			reconcileRequests:  []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeName}}},
+			wantUnhealthyNodes: nil,
+			wantEvictedCond: &metav1.Condition{
+				Type:   kueue.WorkloadEvicted,
+				Status: metav1.ConditionTrue,
+				Reason: "Evicted",
 			},
 		},
 	}

@@ -1672,3 +1672,23 @@ func PriorityChanged(old, new *kueue.Workload) bool {
 	// Check if priority value changed (for WorkloadPriorityClass value updates).
 	return priority.Priority(old) != priority.Priority(new)
 }
+
+// TASAssignedNodeNames extracts the unique set of node names that a Workload is assigned to.
+func TASAssignedNodeNames(wl *kueue.Workload) []string {
+	if !IsAdmittedByTAS(wl) {
+		return nil
+	}
+
+	nodesSet := sets.New[string]()
+	for _, psa := range wl.Status.Admission.PodSetAssignments {
+		if psa.TopologyAssignment == nil || !tas.IsLowestLevelHostname(psa.TopologyAssignment.Levels) {
+			continue
+		}
+		for domain := range tas.InternalSeqFrom(psa.TopologyAssignment) {
+			if len(domain.Values) > 0 && domain.Count > 0 {
+				nodesSet.Insert(domain.Values[len(domain.Values)-1])
+			}
+		}
+	}
+	return nodesSet.UnsortedList()
+}
