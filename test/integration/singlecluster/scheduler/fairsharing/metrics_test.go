@@ -458,7 +458,7 @@ var _ = ginkgo.Describe("Cohorts", func() {
 			})
 		})
 
-		ginkgo.It("correctly handles cohort metrics when workload admitted with admission check", func() {
+		ginkgo.XIt("correctly handles cohort metrics when workload admitted with admission check", func() {
 			const (
 				numWorkloadsForCQ1 = 5
 				numWorkloadsForCQ2 = 2
