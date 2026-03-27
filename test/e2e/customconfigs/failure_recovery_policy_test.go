@@ -32,7 +32,6 @@ import (
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/constants"
 	"sigs.k8s.io/kueue/pkg/features"
-	"sigs.k8s.io/kueue/pkg/util/tas"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	testingjob "sigs.k8s.io/kueue/pkg/util/testingjobs/job"
 	"sigs.k8s.io/kueue/test/util"
@@ -161,20 +160,18 @@ var _ = ginkgo.Describe("Failure Recovery Policy", ginkgo.Ordered, ginkgo.Contin
 			})
 		})
 
-		ginkgo.AfterEach(func() {
+		ginkgo.JustAfterEach(func() {
 			ginkgo.By("starting the kubelet on the node running the pod", func() {
 				cmd := exec.Command("docker", "exec", nodeName, "systemctl", "start", "kubelet")
 				gomega.Expect(cmd.Run()).To(gomega.Succeed())
 			})
 
 			ginkgo.By("waiting for the node to be ready again", func() {
-				gomega.Eventually(func(g gomega.Gomega) {
-					node := &corev1.Node{}
-					g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns.Name}, node)).To(gomega.Succeed())
-					g.Expect(tas.IsNodeStatusConditionTrue(node.Status.Conditions, corev1.NodeReady)).To(gomega.BeTrue())
-				}, util.MediumTimeout, util.Interval).Should(gomega.Succeed())
+				util.ExpectNodeToBecomeReady(ctx, k8sClient, nodeName, lq)
 			})
+		})
 
+		ginkgo.AfterEach(func() {
 			ginkgo.By("deleting the cluster queue", func() {
 				util.ExpectObjectToBeDeleted(ctx, k8sClient, cq, true)
 			})
