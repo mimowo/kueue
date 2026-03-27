@@ -69,3 +69,8 @@ var _ = ginkgo.BeforeSuite(func() {
 		"waitingTime", time.Since(waitForAvailableStart),
 	)
 })
+
+var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Report) {
+	err := util.ConfigureSuiteReporting(report)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+})
