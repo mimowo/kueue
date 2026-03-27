@@ -284,6 +284,14 @@ const (
 	// Use a 5min buffer so that workloads with scheduling timestamps within this
 	// buffer do not preempt each other based on LowerOrNewerEqualPriority.
 	SchedulerTimestampPreemptionBuffer featuregate.Feature = "SchedulerTimestampPreemptionBuffer"
+
+	// owner: @mbobrovskyi
+	//
+	// issue: https://github.com/kubernetes-sigs/kueue/issues/9872
+	//
+	// ShortWorkloadNames ensures that generated Workload names do not exceed
+	// 63 characters, making them compatible with Kubernetes label value limits.
+	ShortWorkloadNames featuregate.Feature = "ShortWorkloadNames"
 )
 
 func init() {
@@ -440,6 +448,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	SchedulerTimestampPreemptionBuffer: {
 		{Version: version.MustParse("0.15"), Default: false, PreRelease: featuregate.Alpha}, // remove in 0.20
+	},
+	ShortWorkloadNames: {
+		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 }
 

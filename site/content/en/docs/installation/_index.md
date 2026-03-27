@@ -283,9 +283,11 @@ spec:
 {{< feature-gates-table stage="alpha-beta" >}}
 
 {{% alert title="Note" color="primary" %}}
+<<<<<<< HEAD
 The SanitizePodSets and MultiKueueAllowInsecureKubeconfigs features are available starting from versions 0.13.8 and 0.14.3.
 The PropagateBatchJobLabelsToWorkload and SchedulerTimestampPreemptionBuffer feature is available starting from versions 0.13.10 and 0.14.5.
 The SchedulerLongRequeueInterval features are available starting from versions 0.15.6 and 0.16.3.
+The ShortWorkloadNames features are available starting from versions 0.15.7 and 0.16.4.
 {{% /alert %}}
 
 ### Feature gates for graduated or deprecated features
