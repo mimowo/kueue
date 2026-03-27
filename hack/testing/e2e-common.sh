@@ -1111,3 +1111,33 @@ EOF
     echo "Upgrade complete (rolling update finished)"
     echo "========================================="
 }
+
+# Run ginkgo e2e tests with extra CLI flags from GINKGO_ARGS.
+#
+# GINKGO_ARGS may contain multiple flags and quoted values with spaces, e.g.
+#   GINKGO_ARGS='--repeat=2 --focus="should run one case"'
+# so it must be reparsed into an array before invocation.
+# Package paths must not be passed via GINKGO_ARGS; they come from "$@".
+run_e2e_ginkgo() {
+  local ginkgo_extra=()
+  local had_noglob=0
+  local rc=0
+
+  if [[ -n ${GINKGO_ARGS:-} ]]; then
+    # Preserve the caller's globbing state. While reparsing GINKGO_ARGS we want
+    # shell quoting to work, but we do not want '*' or '?' expanded to filenames.
+    [[ $- == *f* ]] && had_noglob=1
+    set -f
+    eval "ginkgo_extra=($GINKGO_ARGS)"
+    rc=$?
+    (( had_noglob == 0 )) && set +f
+    (( rc == 0 )) || return "$rc"
+  fi
+
+  # Print the exact argv for troubleshooting quoting / flag-order issues.
+  printf 'running:' >&2
+  printf ' %q' "$GINKGO" run "${ginkgo_extra[@]}" "$@" >&2
+  printf '\n' >&2
+
+  "$GINKGO" run "${ginkgo_extra[@]}" "$@"
+}
