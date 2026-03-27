@@ -25,7 +25,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/kueue/pkg/features"
 )
@@ -63,22 +62,28 @@ func truncate(s string, n int) string {
 }
 
 func GetWorkloadNameForOwnerWithGVK(ownerName string, ownerUID types.UID, ownerGVK schema.GroupVersionKind) string {
-	return generateWorkloadName(ownerName, ownerUID, ownerGVK, nil)
+	return GenerateWorkloadNameWithExtra(ownerName, ownerUID, ownerGVK, "")
+}
+
+func GenerateWorkloadNamePrefix(ownerName string, ownerUID types.UID, ownerGVK schema.GroupVersionKind) string {
+	return truncate(strings.ToLower(ownerGVK.Kind)+"-"+ownerName, maxPrefixLength())
 }
 
 func GetWorkloadNameForOwnerWithGVKAndGeneration(ownerName string, ownerUID types.UID, ownerGVK schema.GroupVersionKind, generation int64) string {
-	return generateWorkloadName(ownerName, ownerUID, ownerGVK, &generation)
+	extra := strconv.FormatInt(generation, 10)
+	return GenerateWorkloadNameWithExtra(ownerName, ownerUID, ownerGVK, extra)
 }
 
-func generateWorkloadName(ownerName string, ownerUID types.UID, ownerGVK schema.GroupVersionKind, generation *int64) string {
+func GenerateWorkloadNameWithExtra(ownerName string, ownerUID types.UID, ownerGVK schema.GroupVersionKind, extra string) string {
+	prefixedName := GenerateWorkloadNamePrefix(ownerName, ownerUID, ownerGVK)
 	return fmt.Sprintf(
 		"%s-%s",
-		truncate(fmt.Sprintf("%s-%s", strings.ToLower(ownerGVK.Kind), ownerName), maxPrefixLength()),
-		getHash(ownerName, ownerUID, ownerGVK, generation)[:hashLength],
+		prefixedName,
+		getHash(ownerName, ownerUID, ownerGVK, extra)[:hashLength],
 	)
 }
 
-func getHash(ownerName string, ownerUID types.UID, gvk schema.GroupVersionKind, generation *int64) string {
+func getHash(ownerName string, ownerUID types.UID, gvk schema.GroupVersionKind, extra string) string {
 	h := sha1.New()
 	h.Write([]byte(gvk.Kind))
 	h.Write([]byte("\n"))
@@ -87,9 +92,9 @@ func getHash(ownerName string, ownerUID types.UID, gvk schema.GroupVersionKind, 
 	h.Write([]byte(ownerName))
 	h.Write([]byte("\n"))
 	h.Write([]byte(ownerUID))
-	if generation != nil {
+	if extra != "" {
 		h.Write([]byte("\n"))
-		h.Write([]byte(strconv.FormatInt(ptr.Deref(generation, 0), 10)))
+		h.Write([]byte(extra))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

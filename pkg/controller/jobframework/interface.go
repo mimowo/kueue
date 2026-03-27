@@ -170,6 +170,21 @@ type JobWithManagedBy interface {
 	SetManagedBy(*string)
 }
 
+// JobWithCustomAnnotations interface should be implemented by generic jobs
+// when custom annotations should be updated to API server when there is change.
+// An example is RayJob may have "kueue.x-k8s.io/podset-replica-sizes", which reflects the current replica sizes from
+// underlying RayCluster. Job reconciler will call this method `UpdateAnnotations` to update such annotations to API Server.
+type JobWithCustomAnnotations interface {
+	// GetCustomAnnotations gets extra annotations needed to be added to the job
+	GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error)
+}
+
+// ElasticWorkloadNameProvider interface contains method to provide extra information to build workload name for elastic job
+type ElasticWorkloadNameProvider interface {
+	// GetWorkloadNameExtraPart gets extra information to build workload name
+	GetWorkloadNameExtraPart() string
+}
+
 // TopLevelJob interface is an optional interface used to indicate
 // that the Job owns/manages the Workload object, regardless of the Job
 // owner references.

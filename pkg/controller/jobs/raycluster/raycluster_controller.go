@@ -76,6 +76,7 @@ type RayCluster rayv1.RayCluster
 
 var _ jobframework.GenericJob = (*RayCluster)(nil)
 var _ jobframework.JobWithManagedBy = (*RayCluster)(nil)
+var _ jobframework.JobWithCustomAnnotations = (*RayCluster)(nil)
 
 func (j *RayCluster) Object() client.Object {
 	return (*rayv1.RayCluster)(j)
@@ -179,6 +180,10 @@ func (j *RayCluster) Finished(ctx context.Context) (message string, success, fin
 
 func (j *RayCluster) PodsReady(ctx context.Context) bool {
 	return j.Status.State == rayv1.Ready
+}
+
+func (j *RayCluster) GetCustomAnnotations(ctx context.Context, c client.Client, podSets []kueue.PodSet) (map[string]string, error) {
+	return GetWorkloadslicingRayClusterCustomAnnotations(ctx, c, j.Object(), podSets, j.Name)
 }
 
 func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {

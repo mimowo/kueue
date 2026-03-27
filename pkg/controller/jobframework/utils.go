@@ -26,6 +26,13 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/orderedgroups"
 )
 
+// PodSetReplicaSize is a minimal representation of a PodSet for the
+// PodsetReplicaSizesAnnotation, containing only name and count.
+type PodSetReplicaSize struct {
+	Name  kueue.PodSetReference `json:"name"`
+	Count int32                 `json:"count"`
+}
+
 // JobPodSets retrieves the pod sets from a GenericJob and applies environment variable
 // deduplication if the SanitizePodSets feature gate is enabled.
 func JobPodSets(ctx context.Context, job GenericJob) ([]kueue.PodSet, error) {
