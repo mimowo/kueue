@@ -82,12 +82,13 @@ func managerAndSchedulerSetup(transformations []config.ResourceTransformation) f
 		if len(transformations) > 0 {
 			queueOptions = append(queueOptions, qcache.WithResourceTransformations(transformations))
 		}
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 		configuration := &config.Configuration{}
 		mgr.GetScheme().Default(configuration)
 
-		preemptionExpectations := preemptexpectations.New()
 		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 

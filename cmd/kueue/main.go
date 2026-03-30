@@ -307,6 +307,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	preemptionExpectations := preemptexpectations.New()
+	queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
 	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer, queueOptions...)
 
 	if err := setupIndexes(ctx, mgr, &cfg); err != nil {
@@ -340,8 +342,6 @@ func main() {
 			queues.ResyncGaugeMetrics()
 		})
 	}
-
-	preemptionExpectations := preemptexpectations.New()
 
 	if err := setupControllers(ctx, mgr, cCache, queues, &cfg, serverVersionFetcher, roleTracker, preemptionExpectations); err != nil {
 		setupLog.Error(err, "Unable to setup controllers")

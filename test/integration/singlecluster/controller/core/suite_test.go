@@ -124,14 +124,15 @@ func managerAndControllerSetup(controllersCfg *config.Configuration, options ...
 			schdcache.WithResourceMetrics(controllersCfg.Metrics.EnableClusterQueueResources),
 			schdcache.WithRoleTracker(opts.roleTracker),
 		}
+		preemptionExpectations := preemptexpectations.New()
 		queueOpts := []qcache.Option{
 			qcache.WithRoleTracker(opts.roleTracker),
+			qcache.WithPreemptionExpectations(preemptionExpectations),
 		}
 
 		cCache := schdcache.New(mgr.GetClient(), cacheOpts...)
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOpts...)
 
-		preemptionExpectations := preemptexpectations.New()
 		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, opts.roleTracker, preemptionExpectations)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
