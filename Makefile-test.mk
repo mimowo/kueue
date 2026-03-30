@@ -91,7 +91,11 @@ test: gotestsum ## Run tests.
 
 .PHONY: test-integration
 test-integration: compile-crd-manifests envtest ginkgo dep-crds kueuectl ginkgo-top ## Run integration tests for all singlecluster suites.
-	KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)" \
+	$(MAKE) test-integration-run
+
+.PHONY: test-integration-run
+test-integration-run:
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 	PROJECT_DIR=$(PROJECT_DIR)/ \
 	KUEUE_BIN=$(BIN_DIR) \
 	ENVTEST_K8S_VERSION=$(ENVTEST_K8S_VERSION) \

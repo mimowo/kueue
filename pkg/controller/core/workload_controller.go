@@ -834,10 +834,8 @@ func (r *WorkloadReconciler) Delete(e event.TypedDeleteEvent[*kueue.Workload]) b
 	log.V(2).Info("Workload delete event")
 	ctx := ctrl.LoggerInto(context.Background(), log)
 
-	if !e.DeleteStateUnknown {
-		r.preemptionExpectations.ObservedUID(log,
-			client.ObjectKeyFromObject(e.Object), e.Object.UID)
-	}
+	r.preemptionExpectations.ObservedUID(log,
+		client.ObjectKeyFromObject(e.Object), e.Object.UID)
 
 	// Delete from cache unconditionally. Pending workloads may have been "assumed"
 	// by the scheduler, and leaving them blocks ClusterQueue finalizer removal.
@@ -878,11 +876,6 @@ func (r *WorkloadReconciler) Update(e event.TypedUpdateEvent[*kueue.Workload]) b
 		log = log.WithValues("prevClusterQueue", e.ObjectOld.Status.Admission.ClusterQueue)
 	}
 	log.V(2).Info("Workload update event")
-
-	if workload.IsEvicted(e.ObjectNew) && !workload.IsEvicted(e.ObjectOld) {
-		r.preemptionExpectations.ObservedUID(log,
-			client.ObjectKeyFromObject(e.ObjectNew), e.ObjectNew.UID)
-	}
 
 	wlCopy := e.ObjectNew.DeepCopy()
 	// We do not handle old workload here as it will be deleted or replaced by new one anyway.

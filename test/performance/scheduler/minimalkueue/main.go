@@ -188,12 +188,12 @@ func mainWithExitCode() int {
 		return 1
 	}
 
-	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer)
+	preemptionExpectations := preemptexpectations.New()
+	queueOptions := qcache.WithPreemptionExpectations(preemptionExpectations)
+	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer, queueOptions)
 
 	go queues.CleanUpOnContext(ctx)
 	go cCache.CleanUpOnContext(ctx)
-
-	preemptionExpectations := preemptexpectations.New()
 
 	// Setup core controllers
 	if failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &configapi.Configuration{}, preemptionExpectations); err != nil {

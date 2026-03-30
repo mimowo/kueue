@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package core
+package sparkapplication
 
 import (
 	"context"
@@ -22,7 +22,6 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -31,14 +30,15 @@ import (
 	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
-	"sigs.k8s.io/kueue/pkg/controller/admissionchecks/provisioning"
 	"sigs.k8s.io/kueue/pkg/controller/core"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
+	"sigs.k8s.io/kueue/pkg/controller/jobframework"
+	workloadsparkapplication "sigs.k8s.io/kueue/pkg/controller/jobs/sparkapplication"
 	"sigs.k8s.io/kueue/pkg/controller/tas"
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
+	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
-	"sigs.k8s.io/kueue/pkg/util/webhook"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -49,24 +49,21 @@ var (
 	k8sClient client.Client
 	ctx       context.Context
 	fwk       *framework.Framework
-	// Cleanup after https://github.com/kubernetes-sigs/kueue/issues/8653
-	qManager *qcache.Manager
 )
 
 func TestAPIs(t *testing.T) {
 	gomega.RegisterFailHandler(ginkgo.Fail)
 
 	ginkgo.RunSpecs(t,
-		"TopologyAwareScheduling Suite",
+		"SparkApplication Controller Suite",
 	)
 }
 
 var _ = ginkgo.BeforeSuite(func() {
+	features.SetFeatureGateDuringTest(ginkgo.GinkgoTB(), features.SparkApplicationIntegration, true)
+
 	fwk = &framework.Framework{
-		WebhookPath: util.WebhookPath,
-		DepCRDPaths: []string{
-			util.AutoscalerCrds,
-		},
+		DepCRDPaths: []string{util.SparkOperatorCrds},
 	}
 	cfg = fwk.Init()
 	ctx, k8sClient = fwk.SetupClient(cfg)
@@ -81,51 +78,51 @@ var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Repo
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 })
 
-func managerSetup(resourceTransformations ...config.ResourceTransformation) func(ctx context.Context, mgr manager.Manager) {
+func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 	return func(ctx context.Context, mgr manager.Manager) {
+		reconciler, err := workloadsparkapplication.NewReconciler(
+			ctx,
+			mgr.GetClient(),
+			mgr.GetFieldIndexer(),
+			mgr.GetEventRecorderFor(constants.JobControllerName),
+			opts...)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = workloadsparkapplication.SetupIndexes(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = reconciler.SetupWithManager(mgr)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		err = workloadsparkapplication.SetupWebhook(mgr, opts...)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		failedWebhook, err := webhooks.Setup(mgr, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
+	}
+}
+
+func managerAndSchedulerSetup(setupTASControllers bool, opts ...jobframework.Option) framework.ManagerSetup {
+	return func(ctx context.Context, mgr manager.Manager) {
+		managerSetup(opts...)(ctx, mgr)
+
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		failedWebhook, err := webhooks.Setup(mgr)
-		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
-
-		err = webhook.SetupNoopWebhook(mgr, &corev1.Pod{})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		controllersCfg := &config.Configuration{}
-		mgr.GetScheme().Default(controllersCfg)
-
-		cacheOptions := []schdcache.Option{
-			schdcache.WithResourceTransformations(resourceTransformations),
-		}
-		cCache := schdcache.New(mgr.GetClient(), cacheOptions...)
+		cCache := schdcache.New(mgr.GetClient())
 		preemptionExpectations := preemptexpectations.New()
-		queueOptions := []qcache.Option{
-			qcache.WithResourceTransformations(resourceTransformations),
-			qcache.WithPreemptionExpectations(preemptionExpectations),
-		}
+		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
-		qManager = queues
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, controllersCfg, preemptionExpectations)
-		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "Core controller", failedCtrl)
+		configuration := &config.Configuration{}
+		mgr.GetScheme().Default(configuration)
 
-		failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, controllersCfg)
-		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
-		err = tasindexer.SetupIndexes(ctx, mgr.GetFieldIndexer())
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		if setupTASControllers {
+			failedCtrl, err = tas.SetupControllers(mgr, queues, cCache, configuration, nil)
+			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
 
-		err = provisioning.SetupIndexer(ctx, mgr.GetFieldIndexer())
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		reconciler, err := provisioning.NewController(
-			mgr.GetClient(),
-			mgr.GetEventRecorderFor("kueue-provisioning-request-controller"))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		err = reconciler.SetupWithManager(mgr)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			err = tasindexer.SetupIndexes(ctx, mgr.GetFieldIndexer())
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 
 		sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
 		err = sched.Start(ctx)
