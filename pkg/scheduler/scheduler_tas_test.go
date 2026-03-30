@@ -6305,8 +6305,6 @@ func TestScheduleForTASCohorts(t *testing.T) {
 				utiltesting.MakeEventRecord("default", "low-cpu", "Preempted", corev1.EventTypeNormal).Obj(),
 				utiltesting.MakeEventRecord("default", "low-gpu", "EvictedDueToPreempted", corev1.EventTypeNormal).Obj(),
 				utiltesting.MakeEventRecord("default", "low-gpu", "Preempted", corev1.EventTypeNormal).Obj(),
-				utiltesting.MakeEventRecord("default", "standard", "PreemptedWorkload", corev1.EventTypeNormal).Obj(),
-				utiltesting.MakeEventRecord("default", "standard", "PreemptedWorkload", corev1.EventTypeNormal).Obj(),
 				utiltesting.MakeEventRecord("default", "standard", "Pending", corev1.EventTypeWarning).Obj(),
 			},
 			eventCmpOpts: cmp.Options{eventIgnoreMessage},
