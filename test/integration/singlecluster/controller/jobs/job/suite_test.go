@@ -111,10 +111,7 @@ func managerAndControllersSetup(
 
 		cCache := schdcache.New(mgr.GetClient())
 		preemptionExpectations := preemptexpectations.New()
-		queueOptions := []qcache.Option{
-			qcache.WithPreemptionExpectations(preemptionExpectations),
-			qcache.WithLocalQueueMetrics(lqMetrics),
-		}
+		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, preemptionExpectations)
