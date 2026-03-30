@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -777,6 +778,96 @@ func TestDominantResourceShare(t *testing.T) {
 			}
 			if diff := cmp.Diff(sets.New(tc.want...), sets.New(gotSnapshot...)); diff != "" {
 				t.Errorf("dominantResourceShare snapshot mismatch: %s", diff)
+			}
+		})
+	}
+}
+
+func TestIsBorrowingOn(t *testing.T) {
+	cpuDefault := resources.FlavorResource{Flavor: "default", Resource: corev1.ResourceCPU}
+	gpuDefault := resources.FlavorResource{Flavor: "default", Resource: "example.com/gpu"}
+
+	// CQ "cq" quota: cpu=2, gpu=5. Lending CQ adds: cpu=8, gpu=5.
+	// Cohort subtreeQuota: cpu=10, gpu=10.
+	cases := map[string]struct {
+		usage                    resources.FlavorResourceQuantities
+		requestedFRs             resources.FlavorResourceQuantities
+		wantBorrowingOnRequested bool
+	}{
+		"borrows on requested flavor": {
+			usage:                    resources.FlavorResourceQuantities{cpuDefault: 3_000},
+			requestedFRs:             resources.FlavorResourceQuantities{cpuDefault: 1_000},
+			wantBorrowingOnRequested: true,
+		},
+		"borrows on unrequested flavor only": {
+			usage:                    resources.FlavorResourceQuantities{cpuDefault: 1_000, gpuDefault: 7},
+			requestedFRs:             resources.FlavorResourceQuantities{cpuDefault: 1_000},
+			wantBorrowingOnRequested: false,
+		},
+		"borrows on both, requests one": {
+			usage:                    resources.FlavorResourceQuantities{cpuDefault: 3_000, gpuDefault: 7},
+			requestedFRs:             resources.FlavorResourceQuantities{gpuDefault: 1},
+			wantBorrowingOnRequested: true,
+		},
+		"no borrowing": {
+			usage:                    resources.FlavorResourceQuantities{cpuDefault: 1_000, gpuDefault: 2},
+			requestedFRs:             resources.FlavorResourceQuantities{cpuDefault: 1_000},
+			wantBorrowingOnRequested: false,
+		},
+		"nil requestedFRs": {
+			usage:                    resources.FlavorResourceQuantities{cpuDefault: 3_000},
+			requestedFRs:             nil,
+			wantBorrowingOnRequested: false,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now().Truncate(time.Second)
+			cq := utiltestingapi.MakeClusterQueue("cq").
+				Cohort("cohort").
+				FairWeight(resource.MustParse("1")).
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("default").
+						ResourceQuotaWrapper("cpu").NominalQuota("2").Append().
+						ResourceQuotaWrapper("example.com/gpu").NominalQuota("5").Append().
+						Obj(),
+				).Obj()
+			lendingCQ := utiltestingapi.MakeClusterQueue("lending-cq").
+				Cohort("cohort").
+				ResourceGroup(
+					*utiltestingapi.MakeFlavorQuotas("default").
+						ResourceQuotaWrapper("cpu").NominalQuota("8").Append().
+						ResourceQuotaWrapper("example.com/gpu").NominalQuota("5").Append().
+						Obj(),
+				).Obj()
+
+			ctx, log := utiltesting.ContextWithLog(t)
+			cache := New(utiltesting.NewFakeClient())
+			cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
+			_ = cache.AddClusterQueue(ctx, cq)
+			_ = cache.AddClusterQueue(ctx, lendingCQ)
+			snapshot, err := cache.Snapshot(ctx)
+			if err != nil {
+				t.Fatalf("snapshot: %v", err)
+			}
+			i := 0
+			for fr, v := range tc.usage {
+				admission := utiltestingapi.MakeAdmission("cq")
+				quantity := resources.ResourceQuantity(fr.Resource, v)
+				admission.PodSets(utiltestingapi.MakePodSetAssignment(kueue.DefaultPodSetName).
+					Assignment(fr.Resource, fr.Flavor, quantity.String()).
+					Obj())
+				wl := utiltestingapi.MakeWorkload(fmt.Sprintf("wl-%d", i), "default-namespace").
+					ReserveQuotaAt(admission.Obj(), now).Obj()
+				cache.AddOrUpdateWorkload(log, wl)
+				snapshot.AddWorkload(workload.NewInfo(wl))
+				i++
+			}
+
+			snapshotCQ := snapshot.ClusterQueues()["cq"]
+			drs := dominantResourceShare(snapshotCQ, nil)
+			if got := drs.IsBorrowingOn(tc.requestedFRs); got != tc.wantBorrowingOnRequested {
+				t.Errorf("IsBorrowingOn() = %v, want %v", got, tc.wantBorrowingOnRequested)
 			}
 		})
 	}
