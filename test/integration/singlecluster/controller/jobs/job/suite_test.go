@@ -112,12 +112,14 @@ func managerAndControllersSetup(
 		lqMetrics := metrics.NewLocalQueueMetricsConfig(configuration.Metrics.LocalQueueMetrics)
 
 		cCache := schdcache.New(mgr.GetClient(), schdcache.WithLocalQueueMetrics(lqMetrics))
-		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, qcache.WithLocalQueueMetrics(lqMetrics))
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 		opts = append(opts, jobframework.WithCache(cCache))
 		managerSetup(opts...)(ctx, mgr)
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptexpectations.New(), nil)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		if setupTASControllers {
@@ -130,7 +132,7 @@ func managerAndControllersSetup(
 
 		if enableScheduler {
 			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName),
-				scheduler.WithPreemptionExpectations(preemptexpectations.New()))
+				scheduler.WithPreemptionExpectations(preemptionExpectations))
 			err = sched.Start(ctx)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}

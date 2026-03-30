@@ -90,10 +90,12 @@ func managerSetup(
 	if configuration.WaitForPodsReady != nil {
 		opts = append(opts, jobframework.WithWaitForPodsReady(configuration.WaitForPodsReady))
 	}
+	preemptionExpectations := preemptexpectations.New()
 	var queueOptions []qcache.Option
 	if configuration.Resources != nil && len(configuration.Resources.ExcludeResourcePrefixes) > 0 {
 		queueOptions = append([]qcache.Option{}, qcache.WithExcludedResourcePrefixes(configuration.Resources.ExcludeResourcePrefixes))
 	}
+	queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
 	return func(ctx context.Context, mgr manager.Manager) {
 		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -131,7 +133,7 @@ func managerSetup(
 
 		mgr.GetScheme().Default(configuration)
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptexpectations.New(), nil)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		err = job.SetupWebhook(mgr, opts...)
@@ -150,7 +152,7 @@ func managerSetup(
 		}
 
 		if enableScheduler {
-			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptexpectations.New()))
+			sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
 			err := sched.Start(ctx)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}

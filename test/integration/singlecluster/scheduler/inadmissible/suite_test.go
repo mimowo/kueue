@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
+	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
@@ -81,12 +82,14 @@ func managerAndSchedulerSetup(ctx context.Context, mgr manager.Manager) {
 	// Use a longer batch period so that
 	// requeue notifications are reliably collapsed in the test.
 	batchPeriod := 2 * time.Second
-	queues := util.NewManagerForIntegrationTestsWithBatchPeriod(ctx, mgr.GetClient(), cCache, batchPeriod)
+	preemptionExpectations := preemptexpectations.New()
+	queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
+	queues := util.NewManagerForIntegrationTestsWithBatchPeriod(ctx, mgr.GetClient(), cCache, batchPeriod, queueOptions...)
 
 	configuration := &config.Configuration{}
 	mgr.GetScheme().Default(configuration)
 
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptexpectations.New(), nil)
+	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 	failedWebhook, err := webhooks.Setup(mgr, nil)

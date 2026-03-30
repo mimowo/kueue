@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
+	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/admissionchecks/multikueue"
@@ -132,12 +133,14 @@ func managerSetup(ctx context.Context, mgr manager.Manager) {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	cCache := schdcache.New(mgr.GetClient())
-	queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache)
+	preemptionExpecations := preemptexpectations.New()
+	queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpecations)}
+	queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 
 	configuration := &config.Configuration{}
 	mgr.GetScheme().Default(configuration)
 
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptexpectations.New(), nil)
+	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpecations, nil)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 	failedWebhook, err := webhooks.Setup(mgr, nil)

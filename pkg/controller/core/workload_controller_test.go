@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/dra"
 	"sigs.k8s.io/kueue/pkg/features"
+	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	utilqueue "sigs.k8s.io/kueue/pkg/util/queue"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
@@ -2829,7 +2830,8 @@ func TestReconcile(t *testing.T) {
 				recorder := &utiltesting.EventRecorder{}
 
 				cqCache := schdcache.New(cl)
-				qManager := qcache.NewManagerForUnitTests(cl, cqCache)
+				queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptexpectations.New())}
+				qManager := qcache.NewManagerForUnitTests(cl, cqCache, queueOptions...)
 				reconciler := NewWorkloadReconciler(cl, qManager, cqCache, recorder, tc.reconcilerOpts...)
 				// use a fake clock with jitter = 0 to be able to assert on the requeueAt.
 				reconciler.clock = fakeClock
@@ -3119,7 +3121,8 @@ func TestWorkloadDeletion(t *testing.T) {
 			cl := clientBuilder.Build()
 			recorder := &utiltesting.EventRecorder{}
 			cqCache := schdcache.New(cl)
-			qManager := qcache.NewManagerForUnitTests(cl, cqCache)
+			queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptexpectations.New())}
+			qManager := qcache.NewManagerForUnitTests(cl, cqCache, queueOptions...)
 
 			mockWatcher := mockWorkloadUpdateWatcher(qManager)
 

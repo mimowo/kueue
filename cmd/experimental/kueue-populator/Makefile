@@ -80,6 +80,7 @@ build:
 .PHONY: image-build
 image-build:
 	$(IMAGE_BUILD_CMD) \
+		-f Dockerfile \
 		-t $(IMAGE_TAG) \
 		--platform=$(PLATFORMS) \
 		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
@@ -87,7 +88,7 @@ image-build:
 		--build-arg CGO_ENABLED=$(CGO_ENABLED) \
 		$(PUSH) \
 		$(IMAGE_BUILD_EXTRA_OPTS) \
-		.
+		$(ROOT_DIR)
 
 .PHONY: image-push
 image-push: PUSH=--push

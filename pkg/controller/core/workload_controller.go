@@ -1037,10 +1037,8 @@ func (r *WorkloadReconciler) Delete(e event.TypedDeleteEvent[*kueue.Workload]) b
 		status = workload.Status(e.Object)
 	}
 	r.logger().V(2).Info("Workload delete event", "workload", klog.KObj(e.Object), "queue", e.Object.Spec.QueueName, "status", status)
-	if !e.DeleteStateUnknown {
-		r.preemptionExpectations.ObservedUID(r.logger(),
-			client.ObjectKeyFromObject(e.Object), e.Object.UID)
-	}
+	r.preemptionExpectations.ObservedUID(r.logger(),
+		client.ObjectKeyFromObject(e.Object), e.Object.UID)
 	return true
 }
 
@@ -1067,11 +1065,6 @@ func (r *WorkloadReconciler) Update(e event.TypedUpdateEvent[*kueue.Workload]) b
 		log = log.WithValues("prevClusterQueue", e.ObjectOld.Status.Admission.ClusterQueue)
 	}
 	log.V(2).Info("Workload update event")
-
-	if workload.IsEvicted(e.ObjectNew) && !workload.IsEvicted(e.ObjectOld) {
-		r.preemptionExpectations.ObservedUID(log,
-			client.ObjectKeyFromObject(e.ObjectNew), e.ObjectNew.UID)
-	}
 
 	wlCopy := e.ObjectNew.DeepCopy()
 	wlKey := workload.Key(e.ObjectNew)

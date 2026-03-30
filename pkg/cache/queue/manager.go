@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/dra"
 	"sigs.k8s.io/kueue/pkg/metrics"
 	afs "sigs.k8s.io/kueue/pkg/util/admissionfairsharing"
+	"sigs.k8s.io/kueue/pkg/util/expectations"
 	"sigs.k8s.io/kueue/pkg/util/queue"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -64,6 +65,12 @@ func WithClock(c clock.WithDelayedExecution) Option {
 func WithAdmissionFairSharing(cfg *config.AdmissionFairSharing) Option {
 	return func(m *Manager) {
 		m.admissionFairSharingConfig = cfg
+	}
+}
+
+func WithPreemptionExpectations(preemptionExpectations *expectations.Store) Option {
+	return func(m *Manager) {
+		m.preemptionExpectations = preemptionExpectations
 	}
 }
 
@@ -156,6 +163,12 @@ type Manager struct {
 	lqMetrics    *metrics.LocalQueueMetricsConfig
 
 	requeuer inadmissibleRequeuer
+
+	// preemptionExpectations track the preemptions initated by scheduler,
+	// but for which scheduler does not yet observed the Evicted condition.
+	// Once the Evicted condition is observed by scheduler the expectation
+	// can be removed - the expectation is satisfied.
+	preemptionExpectations *expectations.Store
 }
 
 // NewManager is a factory for cache.queue.Manager. For tests,
@@ -181,11 +194,10 @@ func NewManager(client client.Client, checker StatusChecker, requeuer inadmissib
 		AfsConsumedResources:   queueafs.NewAfsConsumedResources(),
 		requeuer:               requeuer,
 	}
-	m.requeuer.setManager(m)
-
 	for _, option := range options {
 		option(m)
 	}
+	m.requeuer.setManager(m)
 	m.cond.L = &m.RWMutex
 	return m
 }
@@ -564,6 +576,7 @@ func (m *Manager) AddOrUpdateWorkloadWithoutLock(log logr.Logger, w *kueue.Workl
 		return ErrClusterQueueDoesNotExist
 	}
 	cq.PushOrUpdate(wInfo)
+	m.preemptionExpectations.ObservedUID(log, client.ObjectKeyFromObject(w), w.UID)
 	reportLQPendingWorkloads(m, q)
 	reportCQPendingWorkloads(m, cq)
 	m.Broadcast()

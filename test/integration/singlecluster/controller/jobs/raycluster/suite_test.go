@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
+	qcache "sigs.k8s.io/kueue/pkg/cache/queue"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/controller/core"
@@ -105,10 +106,12 @@ func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		cCache := schdcache.New(mgr.GetClient())
-		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache)
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
+		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
 		opts = append(opts, jobframework.WithQueues(queues))
 
-		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &config.Configuration{}, nil, preemptexpectations.New(), nil)
+		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, &config.Configuration{}, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
 		failedWebhook, err := webhooks.Setup(mgr, nil)
@@ -123,7 +126,7 @@ func managerAndSchedulerSetup(opts ...jobframework.Option) framework.ManagerSetu
 		err = raycluster.SetupRayClusterWebhook(mgr, opts...)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptexpectations.New()))
+		sched := scheduler.New(queues, cCache, mgr.GetClient(), mgr.GetEventRecorderFor(constants.AdmissionName), scheduler.WithPreemptionExpectations(preemptionExpectations))
 		err = sched.Start(ctx)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}

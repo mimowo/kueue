@@ -38,6 +38,7 @@ import (
 	tasindexer "sigs.k8s.io/kueue/pkg/controller/tas/indexer"
 	"sigs.k8s.io/kueue/pkg/scheduler"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
+	"sigs.k8s.io/kueue/pkg/util/expectations"
 	"sigs.k8s.io/kueue/pkg/webhooks"
 	"sigs.k8s.io/kueue/test/integration/framework"
 	"sigs.k8s.io/kueue/test/util"
@@ -78,13 +79,15 @@ var _ = ginkgo.ReportAfterSuite("Generate JUnit Report", func(report ginkgo.Repo
 
 func managerSetup(opts ...jobframework.Option) framework.ManagerSetup {
 	return func(ctx context.Context, mgr manager.Manager) {
-		controllersSetup(ctx, mgr, opts...)
+		preemptionExpectations := preemptexpectations.New()
+		controllersSetup(ctx, mgr, preemptionExpectations, opts...)
 	}
 }
 
 func managerAndSchedulerSetup(setupTASControllers bool, opts ...jobframework.Option) framework.ManagerSetup {
 	return func(ctx context.Context, mgr manager.Manager) {
-		cCache, queues, configuration := controllersSetup(ctx, mgr, opts...)
+		preemptionExpectations := preemptexpectations.New()
+		cCache, queues, configuration := controllersSetup(ctx, mgr, preemptionExpectations, opts...)
 		if setupTASControllers {
 			failedCtrl, err := tas.SetupControllers(mgr, queues, cCache, configuration, nil)
 			gomega.Expect(err).ToNot(gomega.HaveOccurred(), "TAS controller", failedCtrl)
@@ -100,10 +103,12 @@ func managerAndSchedulerSetup(setupTASControllers bool, opts ...jobframework.Opt
 }
 
 func controllersSetup(
-	ctx context.Context, mgr manager.Manager, opts ...jobframework.Option,
+	ctx context.Context, mgr manager.Manager, preemptionExpectations *expectations.Store, opts ...jobframework.Option,
 ) (*schdcache.Cache, *qcache.Manager, *config.Configuration) {
 	cCache := schdcache.New(mgr.GetClient())
-	queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache)
+	queueOptions := []qcache.Option{qcache.WithPreemptionExpectations(preemptionExpectations)}
+	queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queueOptions...)
+
 	opts = append(opts, jobframework.WithCache(cCache), jobframework.WithQueues(queues))
 
 	reconciler, err := trainjob.NewReconciler(
@@ -123,7 +128,7 @@ func controllersSetup(
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	configuration := &config.Configuration{}
 	mgr.GetScheme().Default(configuration)
-	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptexpectations.New(), nil)
+	failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 	failedWebhook, err := webhooks.Setup(mgr, nil)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)

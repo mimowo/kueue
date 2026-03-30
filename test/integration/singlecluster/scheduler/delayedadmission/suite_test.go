@@ -89,9 +89,10 @@ func managerAndSchedulerSetup(configuration *configapi.Configuration) framework.
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		cCache := schdcache.New(mgr.GetClient(), cacheOpts...)
+		preemptionExpectations := preemptexpectations.New()
+		queuesOpts = append(queuesOpts, qcache.WithPreemptionExpectations(preemptionExpectations))
 		queues := util.NewManagerForIntegrationTests(ctx, mgr.GetClient(), cCache, queuesOpts...)
 
-		preemptionExpectations := preemptexpectations.New()
 		failedCtrl, err := core.SetupControllers(mgr, queues, cCache, configuration, nil, preemptionExpectations, nil)
 		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
 
