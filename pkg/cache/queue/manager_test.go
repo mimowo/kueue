@@ -638,7 +638,6 @@ func TestAddWorkload(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.workload.Name, func(t *testing.T) {
-			manager := NewManagerForUnitTests(utiltesting.NewFakeClient(), nil, queueOptions...)
 			err := manager.AddOrUpdateWorkload(tc.workload)
 			if diff := cmp.Diff(tc.wantErr, err, cmpopts.EquateErrors()); len(diff) != 0 {
 				t.Errorf("Unexpected AddWorkload returned error (-want,+got):\n%s", diff)

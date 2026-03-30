@@ -23,10 +23,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	config "sigs.k8s.io/kueue/apis/config/v1beta1"
-	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta1"
+	config "sigs.k8s.io/kueue/apis/config/v1beta2"
+	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/cmd/experimental/kueue-populator/pkg/constants"
-	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/test/util"
 )
 
@@ -63,7 +63,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should create a LocalQueue when a ClusterQueue with defaultLocalQueue is created", func() {
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				GeneratedName("cq-").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
@@ -81,7 +81,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should create a LocalQueue when a new matching namespace is created", func() {
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: map[string]string{
 						"eng": "dev",
@@ -116,7 +116,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 			labels := map[string]string{
 				"eng": "dev-update",
 			}
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: labels,
 				}).
@@ -147,7 +147,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should not create a LocalQueue if one with the same name already exists", func() {
-			existingLQ := utiltesting.MakeLocalQueue("default-lq", ns.Name).
+			existingLQ := utiltestingapi.MakeLocalQueue("default-lq", ns.Name).
 				ClusterQueue("some-other-cq").
 				GeneratedName("cq-").
 				Obj()
@@ -156,7 +156,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 				gomega.Expect(util.DeleteObject(ctx, k8sClient, existingLQ)).To(gomega.Succeed())
 			}()
 
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
 				}).
@@ -172,7 +172,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 
 		ginkgo.It("should create a LocalQueue when a ClusterQueue is updated", func() {
 			ginkgo.By("Creating new ClusterQueue")
-			cq = utiltesting.MakeClusterQueue("new-cq").
+			cq = utiltestingapi.MakeClusterQueue("new-cq").
 				GeneratedName("cq-").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: map[string]string{"non-matching-label": "true"},
@@ -202,7 +202,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should not delete the LocalQueue when namespace labels are updated to not match", func() {
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
 				}).
@@ -224,7 +224,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should handle ClusterQueue with nil NamespaceSelector", func() {
-			cq = utiltesting.MakeClusterQueue("cq-nil-selector").
+			cq = utiltestingapi.MakeClusterQueue("cq-nil-selector").
 				GeneratedName("cq-").
 				Obj()
 			gomega.Expect(k8sClient.Create(ctx, cq)).To(gomega.Succeed())
@@ -238,7 +238,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should not create a LocalQueue in a namespace that doesn't match the selector", func() {
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
 				}).
@@ -262,7 +262,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 		})
 
 		ginkgo.It("should not delete LocalQueue when ClusterQueue is deleted", func() {
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
 				}).
@@ -293,7 +293,7 @@ var _ = ginkgo.Describe("KueuePopulator controller", ginkgo.Serial, func() {
 			fwk.StopManager(ctx)
 			fwk.StartManager(ctx, cfg, managerAndControllerSetup(controllersCfg))
 
-			cq = utiltesting.MakeClusterQueue("cq").
+			cq = utiltestingapi.MakeClusterQueue("cq").
 				NamespaceSelector(&metav1.LabelSelector{
 					MatchLabels: ns.Labels,
 				}).

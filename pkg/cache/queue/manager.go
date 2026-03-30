@@ -468,7 +468,7 @@ func (m *Manager) AddOrUpdateWorkloadWithoutLock(w *kueue.Workload, opts ...work
 		return ErrClusterQueueDoesNotExist
 	}
 	cq.PushOrUpdate(wInfo)
-	m.preemptionExpectations.ObservedUID(log, client.ObjectKeyFromObject(w), w.UID)
+	m.preemptionExpectations.ObservedUID(ctrl.Log, client.ObjectKeyFromObject(w), w.UID)
 	reportLQPendingWorkloads(m, q)
 	reportCQPendingWorkloads(m, cq)
 	m.Broadcast()

@@ -101,8 +101,12 @@ kind-image-build: image-build
 manifests:
 	$(CONTROLLER_GEN) rbac:roleName=kueue-populator-role output:rbac:artifacts:config=config/rbac paths="./pkg/controller/..."
 
+.PHONY: compile-crd-manifests
+compile-crd-manifests:
+	cd $(ROOT_DIR) && $(MAKE) compile-crd-manifests
+
 .PHONY: test-integration
-test-integration: $(ENVTEST) $(GINKGO)
+test-integration: compile-crd-manifests $(ENVTEST) $(GINKGO)
 	KUBEBUILDER_ASSETS="$(KUBEBUILDER_ASSETS)" \
 	PROJECT_DIR=$(ROOT_DIR)/ \
 	GOWORK=off $(GINKGO) -procs=$(INTEGRATION_NPROCS) -v ./test/integration/...

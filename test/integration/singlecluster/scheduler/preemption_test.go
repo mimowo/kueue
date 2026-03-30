@@ -289,7 +289,7 @@ var _ = ginkgo.Describe("Preemption", func() {
 			ginkgo.By("verify only one preemption event was emitted for each workload", func() {
 				gomega.Eventually(func(g gomega.Gomega) {
 					events, err := utiltesting.HasMatchingEvents(ctx, k8sClient, func(e *corev1.Event) bool {
-						return e.Reason == "PreemptedWorkload" &&
+						return e.Reason == "Preempted" &&
 							e.Type == corev1.EventTypeNormal &&
 							e.InvolvedObject.Kind == "Workload" &&
 							e.InvolvedObject.Namespace == ns.Name
