@@ -278,6 +278,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	preemptionExpectations := preemptexpectations.New()
+	queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
 	queues := qcache.NewManager(mgr.GetClient(), cCache, requeuer, queueOptions...)
 
 	if err := setupIndexes(ctx, mgr, &cfg); err != nil {
@@ -303,8 +305,6 @@ func main() {
 		setupLog.Error(err, "Unable to setup probe endpoints")
 		os.Exit(1)
 	}
-
-	preemptionExpectations := preemptexpectations.New()
 
 	if err := setupControllers(ctx, mgr, cCache, queues, &cfg, serverVersionFetcher, preemptionExpectations); err != nil {
 		setupLog.Error(err, "Unable to setup controllers")
