@@ -406,6 +406,7 @@ func TestReconcile(t *testing.T) {
 		featureGates map[featuregate.Feature]bool
 
 		workload                  *kueue.Workload
+		additionalObjects         []client.Object
 		cq                        *kueue.ClusterQueue
 		lq                        *kueue.LocalQueue
 		resourceClaims            []*resourcev1.ResourceClaim
@@ -2575,12 +2576,27 @@ func TestReconcile(t *testing.T) {
 
 				testWl := tc.workload.DeepCopy()
 				objs := []client.Object{testWl}
+				objs = append(objs, tc.additionalObjects...)
 				for _, rc := range tc.resourceClaims {
 					objs = append(objs, rc)
 				}
 
 				for _, rct := range tc.resourceClaimTemplates {
 					objs = append(objs, rct)
+				}
+
+				// Create a stub owner object so that the FinishOrphanedWorkloads
+				// check does not incorrectly mark them as orphaned. Skip when
+				// the test explicitly enables the feature gate (those tests
+				// provide their own additionalObjects to control ownership).
+				if ref := metav1.GetControllerOf(testWl); ref != nil && !tc.featureGates[features.FinishOrphanedWorkloads] {
+					objs = append(objs, &batchv1.Job{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      ref.Name,
+							Namespace: testWl.Namespace,
+							UID:       ref.UID,
+						},
+					})
 				}
 
 				clientBuilder := utiltesting.NewClientBuilder().

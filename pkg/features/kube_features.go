@@ -299,6 +299,14 @@ const (
 	// ShortWorkloadNames ensures that generated Workload names do not exceed
 	// 63 characters, making them compatible with Kubernetes label value limits.
 	ShortWorkloadNames featuregate.Feature = "ShortWorkloadNames"
+
+	// owner: @sebest
+	//
+	// issue: https://github.com/kubernetes-sigs/kueue/issues/1789
+	// Finish workloads whose controller owner no longer exists, preventing
+	// stale workload accumulation (e.g., after PodsReady timeout eviction
+	// deletes a Deployment-owned pod).
+	FinishOrphanedWorkloads featuregate.Feature = "FinishOrphanedWorkloads"
 )
 
 func init() {
@@ -458,6 +466,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	ShortWorkloadNames: {
 		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	FinishOrphanedWorkloads: {
+		{Version: version.MustParse("0.16"), Default: true, PreRelease: featuregate.Beta},
 	},
 }
 
