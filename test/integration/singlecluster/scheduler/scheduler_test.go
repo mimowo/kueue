@@ -3019,8 +3019,17 @@ var _ = ginkgo.Describe("Scheduler", func() {
 					Obj(),
 			)
 
+			ginkgo.By("verify the cohort_subtree_quota metric is not empty before cohort deletion")
+			util.ExpectCohortSubtreeQuotaGaugeMetric(chRight.Name, onDemandFlavor.Name, corev1.ResourceCPU.String(), 12)
+
 			ginkgo.By("deleting explicit cohort right while cq-b still references it")
 			util.ExpectObjectToBeDeleted(ctx, k8sClient, chRight, true)
+
+			ginkgo.By("wait for the resources for the parent cohort to be adjusted")
+			// The resources for the parent cohort are adjusted in the Reconcile, when r.cache.DeleteCohort is called.
+			// We use the cleanup of the cohort_subtree_quota metric as a proxy to know that the resources are adjusted
+			// as both actions happen inside the Reconciler function for the cohort_controller.
+			util.ExpectCohortSubtreeQuotaGaugeMetricCleaned(chRight.Name, onDemandFlavor.Name, corev1.ResourceCPU.String())
 
 			ginkgo.By("trying to admit extra workload on cq-a after deletion of cohort right")
 			// root cohort subtree quota should be properly recomputed after deletion of right cohort
