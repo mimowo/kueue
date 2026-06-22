@@ -199,6 +199,16 @@ func setSkipped(e *entry, inadmissibleMsg string) {
 	e.LastAssignment = nil
 }
 
+// recordAssignment stores a flavor assignment and its preemption
+// targets from nominate. LastAssignment aliases the stored
+// assignment's LastState so it tracks any later mutation.
+func (e *entry) recordAssignment(a flavorassigner.Assignment, targets []*preemption.Target) {
+	e.assignment = a
+	e.preemptionTargets = targets
+	e.inadmissibleMsg = e.assignment.Message()
+	e.LastAssignment = &e.assignment.LastState
+}
+
 // markPreemptionOutcome records the outcome of IssuePreemptions and
 // clears the cached flavor assignment so the next cycle reconsiders
 // every flavor.
@@ -281,6 +291,8 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 		ctx := ctrl.LoggerInto(ctx, log)
 		log.V(2).Info("Attempting to schedule workload")
 
+		usage, fits := s.reevaluate(log, e, snapshot, cq, preemptedWorkloads)
+
 		mode := e.assignment.RepresentativeMode()
 
 		if features.Enabled(features.TASFailedNodeReplacementFailFast) && workload.HasTopologyAssignmentWithUnhealthyNode(e.Obj) && mode != flavorassigner.Fit {
@@ -322,8 +334,7 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 			continue
 		}
 
-		usage := e.assignmentUsage()
-		if !fits(snapshot, cq, &usage, preemptedWorkloads, e.preemptionTargets) {
+		if !fits {
 			setSkipped(e, "Workload no longer fits after processing another workload")
 			if mode == flavorassigner.Preempt {
 				skippedPreemptions[cq.Name]++
@@ -487,7 +498,22 @@ func (s *Scheduler) nominate(ctx context.Context, workloads []workload.Info, sna
 	return entries, inadmissibleEntries
 }
 
-func fits(snapshot *schdcache.Snapshot, cq *schdcache.ClusterQueueSnapshot, usage *workload.Usage, preemptedWorkloads preemption.PreemptedWorkloads, newTargets []*preemption.Target) bool {
+func (s *Scheduler) reevaluate(log logr.Logger, e *entry, snapshot *schdcache.Snapshot, cq *schdcache.ClusterQueueSnapshot, preemptedWorkloads preemption.PreemptedWorkloads) (workload.Usage, bool) {
+	usage := e.assignmentUsage()
+	fitsCheck := fits(snapshot, cq, &usage, preemptedWorkloads, e.preemptionTargets)
+	if fitsCheck == schdcache.FitsCheckNoTAS {
+		log.Info("Re-computing the assignment as it doesn't fit for TAS")
+		newAssignment, newTargets := s.getAssignments(log, &e.Info, snapshot)
+		e.recordAssignment(newAssignment, newTargets)
+		usage = e.assignmentUsage()
+		fitsCheck = fits(snapshot, cq, &usage, preemptedWorkloads, newTargets)
+		log.Info("Re-computed assignment", "newMode", newAssignment.RepresentativeMode())
+	}
+	return usage, schdcache.FitsCheckOk == fitsCheck
+}
+
+func fits(snapshot *schdcache.Snapshot, cq *schdcache.ClusterQueueSnapshot, usage *workload.Usage, preemptedWorkloads preemption.PreemptedWorkloads,
+	newTargets []*preemption.Target) schdcache.FitsCheck {
 	workloads := slices.Collect(maps.Values(preemptedWorkloads))
 	for _, target := range newTargets {
 		workloads = append(workloads, target.WorkloadInfo)
