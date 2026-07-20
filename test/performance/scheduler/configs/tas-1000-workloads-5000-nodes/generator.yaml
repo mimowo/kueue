@@ -1,0 +1,52 @@
+# TAS profiling scenario: 1,000 workloads, each spanning 50 nodes.
+#
+# Shape:
+#   1 cohort * 100 ClusterQueues * 10 workloads = 1,000 workloads
+#   1 rack * 5,000 hostnames = 5,000 nodes
+#
+# Every node has one CPU and every pod requests one CPU. A workload contains 50
+# single-pod slices, so admitting it produces a topology assignment with 50
+# hostname domains. The topology can hold 100 workloads concurrently. Each
+# ClusterQueue has enough nominal quota for every workload assigned to it, so
+# physical topology capacity—not quota—limits concurrency.
+
+topology:
+  name: "five-thousand-node-topology"
+  levels:
+    - name: rack
+      count: 1
+      nodeLabel: "topology.kubernetes.io/rack"
+    - name: node
+      count: 5000
+      nodeLabel: "kubernetes.io/hostname"
+      capacity:
+        cpu: "1"
+        memory: "1Gi"
+
+resourceFlavor:
+  name: "five-thousand-node-flavor"
+  nodeLabel: "tas-node-group"
+  topologyName: "five-thousand-node-topology"
+
+cohorts:
+  - className: profile-cohort
+    count: 1
+    queuesSets:
+      - className: profile-cq
+        count: 100
+        nominalQuota: "5000"
+        borrowingLimit: "0"
+        reclaimWithinCohort: Never
+        withinClusterQueue: Never
+        workloadsSets:
+          - count: 10
+            creationIntervalMs: 0
+            workloads:
+              - className: fifty-node-workload
+                runtimeMs: 1000
+                priority: 0
+                request: "1"
+                podCount: 50
+                tasConstraint: "preferred"
+                tasLevel: "kubernetes.io/hostname"
+                sliceSize: 1
