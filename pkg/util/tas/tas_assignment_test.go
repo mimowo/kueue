@@ -38,6 +38,36 @@ type testCase struct {
 	totalDomainCount int
 }
 
+// topologyAssignmentForHostnames transforms hostname strings into a single-pod
+// hostname assignment. It is shared by catalog correctness tests and
+// compaction benchmarks. Sorting changes the assignment order before its
+// assignment-scoped catalog is built.
+//
+// Input hostnames ["pool-b-0", "pool-a-0"] with sorted=true produce:
+//
+//	domain hostnames = ["pool-a-0", "pool-b-0"]
+//
+// Here n is the number of hostnames and m is their maximum length. Without
+// sorting, time and auxiliary space complexity are O(n). Sorting adds
+// O(n*log(n)*m) worst-case comparison time.
+func topologyAssignmentForHostnames(hostnames []string, sorted bool) *TopologyAssignment {
+	orderedHostnames := slices.Clone(hostnames)
+	if sorted {
+		slices.Sort(orderedHostnames)
+	}
+	domains := make([]TopologyDomainAssignment, len(hostnames))
+	for i, hostname := range orderedHostnames {
+		domains[i] = TopologyDomainAssignment{
+			Values: []string{hostname},
+			Count:  1,
+		}
+	}
+	return &TopologyAssignment{
+		Levels:  []string{corev1.LabelHostname},
+		Domains: domains,
+	}
+}
+
 // bothWaysTestCases expect that internal <-> v1beta2 maps in both ways.
 var bothWaysTestCases = []testCase{
 	{

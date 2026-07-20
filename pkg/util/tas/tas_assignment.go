@@ -286,7 +286,7 @@ func V1Beta2From(ta *TopologyAssignment, options ...V1Beta2FromOption) *kueue.To
 // when both forms are valid. Assignments above the single-slice domain limit
 // always use hostname-prefix encoding.
 func compactTopologyAssignmentEncoding(log logr.Logger, ta *TopologyAssignment) *kueue.TopologyAssignment {
-	prefixEncoded := compactTopologyAssignmentEncodingWithHostnamePrefixRuns(ta)
+	prefixEncoded := prefixRunsOptimizedTopologyAssignmentEncoding(ta)
 	if len(prefixEncoded.Slices) <= 1 {
 		return prefixEncoded
 	}
