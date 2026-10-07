@@ -139,18 +139,9 @@ Controllers follow the controller-runtime reconciler pattern:
 
 ### Logging
 
-- Use the **logr** interface obtained from context: `log := ctrl.LoggerFrom(ctx)`.
-- Use **klog helpers** for Kubernetes objects: `klog.KObj(obj)`, `klog.KRef(ns, name)`.
-- Follow the verbosity convention:
-  - **V(1)**: Important state changes and key decisions.
-  - **V(2)**: Detailed reconciliation flow.
-  - **V(3)**: Debug details.
-  - **V(4)–V(5)**: Trace-level verbosity.
-- Always use structured key-value pairs, not formatted strings:
-
-  ```go
-  log.V(2).Info("Reconcile Workload", "workload", klog.KObj(wl))
-  ```
+- Follow the [logging policy]({{< relref "logging_policy.md" >}}) when adding or changing logging records.
+- Get the logger from context: `log := ctrl.LoggerFrom(ctx)`.
+- Use structured fields and Kubernetes object helpers such as `klog.KObj(obj)` and `klog.KRef(ns, name)`.
 
 ### Status Conditions
 

@@ -1,13 +1,14 @@
 ---
 name: wrong-log-verbosity
-description: Flag per-reconcile-cycle log lines emitted at V(2) — recurring reconcile-loop logs must be V(4) or higher.
+description: Review changed logging records against the Kueue logging policy.
 license: Apache-2.0
 metadata:
   copyright: The Kubernetes Authors
 ---
 
-# Skill: Wrong Log Verbosity
+# Skill: Logging Policy Review
 
-**Wrong log verbosity** — per-reconcile-cycle log lines emitted at `V(2)`. `V(2)` is
-for coarse-grained lifecycle events; recurring reconcile-loop logs must be `V(4)` or
-higher.
+Read the [logging policy][policy] before reviewing new or modified logging records.
+Check the changed records against its level table and guidelines.
+Cite the changed line and the relevant policy rule for each finding.
+[policy]: ../../../../../../site/content/en/community/contribution_guidelines/logging_policy.md
