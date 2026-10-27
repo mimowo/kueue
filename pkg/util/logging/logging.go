@@ -48,13 +48,14 @@ func GetObjectReferences[T ObjectRefProvider](items []T) []klog.ObjectRef {
 // see https://github.com/kubernetes/community/blob/88841374e9558803b5b2ec81beb450e246283f09/contributors/devel/sig-instrumentation/logging.md?plain=1#L109
 const klogV3Level = zapcore.Level(-3)
 
-// zapcore.Core that overrides log level of
-// expected errors connected to concurrent resources modification and
-// omits their stack trace.
-// Those errors are emitted with klog V3 level.
-// Other logs are left intact, and written using original core.
+// CustomLogProcessor is a zapcore.Core that, before writing an entry:
+//   - lowers expected concurrent modification errors to the klog V3 level,
+//     without a stack trace;
+//   - adds the Fields attached to logged errors with WithFields.
 type CustomLogProcessor struct {
 	zapcore.Core
+	// contextKeys are the keys added with With, which error fields must not repeat.
+	contextKeys []string
 }
 
 func (c CustomLogProcessor) Check(entry zapcore.Entry, checkedEntry *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -69,7 +70,7 @@ func (c CustomLogProcessor) Write(entry zapcore.Entry, fields []zapcore.Field) e
 		entry.Level = klogV3Level
 		entry.Stack = ""
 	}
-	return c.Core.Write(entry, fields)
+	return c.Core.Write(entry, appendErrorFields(fields, c.contextKeys))
 }
 
 const concurrentModificationErrorPrefix = "Operation cannot be fulfilled on"
@@ -95,9 +96,10 @@ func isEntryAConcurrentModificationError(entry zapcore.Entry, fields []zapcore.F
 }
 
 func (c CustomLogProcessor) With(fields []zapcore.Field) zapcore.Core {
-	wrappedClone := c.Core.With(fields)
+	keys := slices.Map(fields, func(f *zapcore.Field) string { return f.Key })
 	return CustomLogProcessor{
-		Core: wrappedClone,
+		Core:        c.Core.With(fields),
+		contextKeys: arrayslices.Concat(c.contextKeys, keys),
 	}
 }
 

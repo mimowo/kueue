@@ -65,6 +65,7 @@ import (
 	clientutil "sigs.k8s.io/kueue/pkg/util/client"
 	"sigs.k8s.io/kueue/pkg/util/equality"
 	"sigs.k8s.io/kueue/pkg/util/kubeversion"
+	utillogging "sigs.k8s.io/kueue/pkg/util/logging"
 	utilpriority "sigs.k8s.io/kueue/pkg/util/priority"
 	utilqueue "sigs.k8s.io/kueue/pkg/util/queue"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
@@ -879,12 +880,14 @@ func (r *JobReconciler) shouldSuspendChildJob(ctx context.Context, childJob Gene
 	if features.Enabled(features.SkipChildJobSuspension) {
 		return false, nil
 	}
-	log := ctrl.LoggerFrom(ctx).WithValues("childJob", childJob.Object().GetName(), "gvk", childJob.GVK(), "ancestorJob", ancestorJob.GetName())
 	_, _, finished := childJob.Finished(ctx)
 	if !finished && !childJob.IsSuspended() {
 		if ancestorNotFinishedWorkload, err := r.getLatestNotFinishedWorkloadForObject(ctx, ancestorJob); err != nil {
-			log.Error(err, "couldn't get an ancestor job not-finished workload")
-			return false, err
+			// The "Reconciler error" entry identifies the child job, not its ancestor.
+			return false, utillogging.WithFields(
+				fmt.Errorf("getting unfinished Workload for ancestor job: %w", err),
+				utillogging.Field{Key: "ancestorJob", Value: klog.KObj(ancestorJob)},
+			)
 		} else {
 			if ancestorNotFinishedWorkload == nil {
 				return true, nil

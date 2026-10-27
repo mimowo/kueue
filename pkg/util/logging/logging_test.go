@@ -52,6 +52,7 @@ func TestCustomLogProcessor(t *testing.T) {
 	someOtherField := zap.String("Some field", "Some value")
 	someOtherErrorMessage := "This is another test error connected with concurrent modification"
 	otherErrorDetailsField := newErrorField("Some other error details")
+	concurrentModificationErrorWithFields := WithFields(DummyError{concurrentModificationErrorDetails}, Field{Key: "workload", Value: "ns/wl"})
 
 	testCases := map[string]struct {
 		logCall     func()
@@ -82,6 +83,14 @@ func TestCustomLogProcessor(t *testing.T) {
 				logger.Error(someOtherErrorMessage, concurrentModificationErrorDetailsFieldWithCustomPrefixAndSuffix)
 			},
 			expectedLog: observedLog{someOtherErrorMessage, warningLevel, []zap.Field{concurrentModificationErrorDetailsFieldWithCustomPrefixAndSuffix}},
+		},
+		"Changes error level of concurrent modification error with fields and adds the fields": {
+			logCall: func() {
+				logger.Error(reconcilerErrorMessage, zap.Error(concurrentModificationErrorWithFields))
+			},
+			expectedLog: observedLog{
+				reconcilerErrorMessage, warningLevel, []zap.Field{zap.Error(concurrentModificationErrorWithFields), zap.String("workload", "ns/wl")},
+			},
 		},
 		"Does not change error level of non concurrent modification error (without appropriate error details)": {
 			logCall: func() {
