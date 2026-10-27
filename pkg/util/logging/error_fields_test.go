@@ -30,57 +30,13 @@ import (
 	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+
+	"sigs.k8s.io/kueue/pkg/util/logging/logerror"
 )
-
-func TestWithFields(t *testing.T) {
-	baseErr := errors.New("listing Workloads failed")
-	ancestorJob := Field{Key: "ancestorJob", Value: klog.KRef("ns", "parent")}
-
-	cases := map[string]struct {
-		err        error
-		fields     []Field
-		wantSame   bool
-		wantFields []Field
-	}{
-		"nil error": {
-			fields:   []Field{ancestorJob},
-			wantSame: true,
-		},
-		"no fields": {
-			err:      baseErr,
-			wantSame: true,
-		},
-		"fields": {
-			err:        baseErr,
-			fields:     []Field{ancestorJob},
-			wantFields: []Field{ancestorJob},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			gotErr := WithFields(tc.err, tc.fields...)
-			if tc.wantSame {
-				if gotErr != tc.err {
-					t.Errorf("WithFields() = %v, want the same error %v", gotErr, tc.err)
-				}
-				return
-			}
-			if !errors.Is(gotErr, tc.err) {
-				t.Errorf("WithFields() = %v, want an error that wraps %v", gotErr, tc.err)
-			}
-			if gotErr.Error() != tc.err.Error() {
-				t.Errorf("Unexpected error message %q, want %q", gotErr.Error(), tc.err.Error())
-			}
-			if diff := cmp.Diff(tc.wantFields, fieldsInErrorTree(gotErr)); diff != "" {
-				t.Errorf("Unexpected fields (-want,+got):\n%s", diff)
-			}
-		})
-	}
-}
 
 func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 	baseErr := errors.New("listing Workloads failed")
-	ancestorJob := Field{Key: "ancestorJob", Value: klog.KRef("ns", "parent")}
+	ancestorJob := logerror.Field{Key: "ancestorJob", Value: klog.KRef("ns", "parent")}
 
 	cases := map[string]struct {
 		log       func(logr.Logger)
@@ -97,7 +53,7 @@ func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 		},
 		"fields of a wrapped error, with a logr.Marshaler value logged as a structure": {
 			log: func(log logr.Logger) {
-				log.Error(fmt.Errorf("getting unfinished Workload for ancestor job: %w", WithFields(baseErr, ancestorJob)), "Reconciler error")
+				log.Error(fmt.Errorf("getting unfinished Workload for ancestor job: %w", logerror.WithFields(baseErr, ancestorJob)), "Reconciler error")
 			},
 			wantEntry: map[string]any{
 				"msg":         "Reconciler error",
@@ -107,12 +63,12 @@ func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 		},
 		"fields of all errors in the tree, with the outer error winning on duplicate keys": {
 			log: func(log logr.Logger) {
-				err := WithFields(
+				err := logerror.WithFields(
 					errors.Join(
-						WithFields(errors.New("first"), Field{Key: "workload", Value: "inner"}, Field{Key: "attempt", Value: 2}),
-						WithFields(errors.New("second"), Field{Key: "clusterQueue", Value: "cq"}),
+						logerror.WithFields(errors.New("first"), logerror.Field{Key: "workload", Value: "inner"}, logerror.Field{Key: "attempt", Value: 2}),
+						logerror.WithFields(errors.New("second"), logerror.Field{Key: "clusterQueue", Value: "cq"}),
 					),
-					Field{Key: "workload", Value: "outer"},
+					logerror.Field{Key: "workload", Value: "outer"},
 				)
 				log.Error(err, "Reconciler error")
 			},
@@ -126,7 +82,7 @@ func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 		},
 		"key/value pairs of the log call win over error fields": {
 			log: func(log logr.Logger) {
-				err := WithFields(baseErr, Field{Key: "workload", Value: "from-error"}, Field{Key: "error", Value: "from-error"})
+				err := logerror.WithFields(baseErr, logerror.Field{Key: "workload", Value: "from-error"}, logerror.Field{Key: "error", Value: "from-error"})
 				log.Error(err, "Reconciler error", "workload", "from-call")
 			},
 			wantEntry: map[string]any{
@@ -137,7 +93,8 @@ func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 		},
 		"keys of the logger context win over error fields": {
 			log: func(log logr.Logger) {
-				log.WithValues("workload", "from-context").Error(WithFields(baseErr, Field{Key: "workload", Value: "from-error"}), "Reconciler error")
+				err := logerror.WithFields(baseErr, logerror.Field{Key: "workload", Value: "from-error"})
+				log.WithValues("workload", "from-context").Error(err, "Reconciler error")
 			},
 			// A repeated key would come last in the JSON and win in the decoded map.
 			wantEntry: map[string]any{
@@ -148,7 +105,7 @@ func TestCustomLogProcessorWritesErrorFields(t *testing.T) {
 		},
 		"fields of an error logged as a key/value pair": {
 			log: func(log logr.Logger) {
-				log.Info("Received an unretryable error", "error", WithFields(baseErr, ancestorJob))
+				log.Info("Received an unretryable error", "error", logerror.WithFields(baseErr, ancestorJob))
 			},
 			wantEntry: map[string]any{
 				"msg":         "Received an unretryable error",
@@ -194,7 +151,7 @@ func TestCustomLogProcessorWritesErrorFieldsLikeKeyValues(t *testing.T) {
 				log.Error(err, "Reconciler error", "value", tc.value)
 			})
 			gotEntry := logJSON(t, func(log logr.Logger) {
-				log.Error(WithFields(err, Field{Key: "value", Value: tc.value}), "Reconciler error")
+				log.Error(logerror.WithFields(err, logerror.Field{Key: "value", Value: tc.value}), "Reconciler error")
 			})
 			if diff := cmp.Diff(wantEntry, gotEntry); diff != "" {
 				t.Errorf("Unexpected log entry (-key/value pair,+error field):\n%s", diff)

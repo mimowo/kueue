@@ -26,6 +26,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+
+	"sigs.k8s.io/kueue/pkg/util/logging/logerror"
 )
 
 // custom debug levels used by logr to better align with usage
@@ -52,7 +54,7 @@ func TestCustomLogProcessor(t *testing.T) {
 	someOtherField := zap.String("Some field", "Some value")
 	someOtherErrorMessage := "This is another test error connected with concurrent modification"
 	otherErrorDetailsField := newErrorField("Some other error details")
-	concurrentModificationErrorWithFields := WithFields(DummyError{concurrentModificationErrorDetails}, Field{Key: "workload", Value: "ns/wl"})
+	concurrentModificationErrorWithFields := logerror.WithFields(DummyError{concurrentModificationErrorDetails}, logerror.Field{Key: "workload", Value: "ns/wl"})
 
 	testCases := map[string]struct {
 		logCall     func()

@@ -51,7 +51,7 @@ const klogV3Level = zapcore.Level(-3)
 // CustomLogProcessor is a zapcore.Core that, before writing an entry:
 //   - lowers expected concurrent modification errors to the klog V3 level,
 //     without a stack trace;
-//   - adds the Fields attached to logged errors with WithFields.
+//   - adds the fields attached to logged errors with the logerror package.
 type CustomLogProcessor struct {
 	zapcore.Core
 	// contextKeys are the keys added with With, which error fields must not repeat.

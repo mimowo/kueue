@@ -41,8 +41,9 @@ Errors:
 
 - Avoid `V(n).Error(...)` and `Enabled()` guards around error logging.
 - Return operational errors from lower-level code and log them once at a higher control layer.
-- Attach context that the higher layer's logger lacks to the returned error with `WithFields` from `pkg/util/logging`,
-  rather than formatting it into the error message, so that it is logged as structured key/value pairs.
+- Attach context that the higher layer's logger lacks to the returned error with `logerror.WithValues` from
+  `pkg/util/logging/logerror`, rather than formatting it into the error message, so that it is logged as structured
+  key/value pairs.
 - Preserve each cause when combining failures.
 - `NotFound` or `Conflict` errors may be logged as diagnostics when normal control flow handles them.
 
