@@ -24,11 +24,22 @@ package v1beta2
 // PodSetPartialPreemptionStatus describes an in-progress partial preemption of
 // a PodSet.
 type PodSetPartialPreemptionStatusApplyConfiguration struct {
-	// targetCount is the number of Pods that the PodSet is being shrunk to.
-	// It is lower than the assignment's count and not lower than the PodSet's
-	// partialPreemption.minCount. Kueue may lower it, but never raises it.
+	// retainedCount is the number of Pods that the latest partial preemption
+	// leaves in the PodSet. It records Kueue's decision, not an observed Pod
+	// count.
 	//
-	TargetCount *int32 `json:"targetCount,omitempty"`
+	// The shrink is in progress while the assignment's count is higher than
+	// retainedCount: Kueue evicts the Pods in excess of retainedCount. Once
+	// none of them is left, including terminating Pods, Kueue lowers count
+	// to retainedCount and resourceUsage in proportion. From then on this
+	// field stays set and has no further effect.
+	//
+	// retainedCount is at least the PodSet's
+	// partialPreemption.minRetainedCount and at most the assignment's count.
+	// Kueue may lower it for another partial preemption, but never raises it
+	// within the same admission.
+	//
+	RetainedCount *int32 `json:"retainedCount,omitempty"`
 }
 
 // PodSetPartialPreemptionStatusApplyConfiguration constructs a declarative configuration of the PodSetPartialPreemptionStatus type for use with
@@ -37,10 +48,10 @@ func PodSetPartialPreemptionStatus() *PodSetPartialPreemptionStatusApplyConfigur
 	return &PodSetPartialPreemptionStatusApplyConfiguration{}
 }
 
-// WithTargetCount sets the TargetCount field in the declarative configuration to the given value
+// WithRetainedCount sets the RetainedCount field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the TargetCount field is set to the value of the last call.
-func (b *PodSetPartialPreemptionStatusApplyConfiguration) WithTargetCount(value int32) *PodSetPartialPreemptionStatusApplyConfiguration {
-	b.TargetCount = &value
+// If called multiple times, the RetainedCount field is set to the value of the last call.
+func (b *PodSetPartialPreemptionStatusApplyConfiguration) WithRetainedCount(value int32) *PodSetPartialPreemptionStatusApplyConfiguration {
+	b.RetainedCount = &value
 	return b
 }

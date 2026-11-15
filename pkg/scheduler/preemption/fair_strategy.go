@@ -153,10 +153,44 @@ func fairPreemptionStrategy(
 			candidatesIter,
 			allowBorrowing,
 			preemptionCtx,
+			&fullPlan{pCtx: preemptionCtx, iterator: &seqIterator{seq: candidatesIter}, allowBorrowing: allowBorrowing},
 			withVerify(func(targets []*Target) (bool, string) {
 				return verifyFairSharingTargets(preemptionCtx, targets, fsStrategies)
 			}),
 		))
+	}
+}
+
+type seqIterator struct {
+	seq  iter.Seq[*Target]
+	next func() (*Target, bool)
+	stop func()
+}
+
+func (c *seqIterator) Reset() {
+	if c.stop != nil {
+		c.stop()
+	}
+	c.next, c.stop = iter.Pull(c.seq)
+}
+
+func (c *seqIterator) Next(_ bool) *Target {
+	if c.next == nil {
+		c.Reset()
+	}
+	t, ok := c.next()
+	if !ok {
+		return nil
+	}
+	return t
+}
+
+// Close stops the underlying pull iterator if it was ever started, releasing its
+// goroutine. Safe to call even if Next was never called or the sequence already ran to
+// completion.
+func (c *seqIterator) Close() {
+	if c.stop != nil {
+		c.stop()
 	}
 }
 
@@ -245,6 +279,14 @@ func noCandidates(preemptionCtx *preemptionCtx, candidates []*workload.Info) boo
 // iterateWithFirstFsStrategy returns preemption candidates in an order based on
 // the first configured FairSharing strategy,
 // retryCandidates may be used if rule S2-b is configured.
+//
+// Unlike classicalCandidateIterator, the YieldFromSnapshot wrap below applies each
+// candidate to the snapshot as soon as it is yielded. That isn't optional here:
+// ComputeShares/ComputeTargetShareAfterRemoval for the next candidate need the
+// snapshot to already reflect every candidate accepted so far, or the DRS shares
+// computed for later candidates would be wrong. fullPlan.walk's own YieldFromSnapshot
+// wrap then re-applies an already-removed workload, which Target.Apply treats as a
+// no-op.
 func iterateWithFirstFsStrategy(
 	log logr.Logger,
 	preemptionCtx *preemptionCtx,

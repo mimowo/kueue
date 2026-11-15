@@ -83,21 +83,21 @@ func expectAdmittedCount(wl *kueue.Workload, want int32) {
 	}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 }
 
-// expectPreemptionTargetCount asserts the admitted workload's first PodSet
+// expectPreemptionRetainedCount asserts the admitted workload's first PodSet
 // assignment carries the given partial-preemption reclaim target (nil means the
 // target has been cleared).
-func expectPreemptionTargetCount(wl *kueue.Workload, want *int32) {
+func expectPreemptionRetainedCount(wl *kueue.Workload, want *int32) {
 	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
 		got := &kueue.Workload{}
 		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), got)).Should(gomega.Succeed())
 		g.Expect(workload.IsAdmitted(got)).Should(gomega.BeTrue())
 		g.Expect(got.Status.Admission).ShouldNot(gomega.BeNil())
 		g.Expect(got.Status.Admission.PodSetAssignments).Should(gomega.HaveLen(1))
-		var targetCount *int32
+		var retainedCount *int32
 		if partialPreemption := got.Status.Admission.PodSetAssignments[0].PartialPreemption; partialPreemption != nil {
-			targetCount = partialPreemption.TargetCount
+			retainedCount = partialPreemption.RetainedCount
 		}
-		g.Expect(targetCount).Should(gomega.Equal(want))
+		g.Expect(retainedCount).Should(gomega.Equal(want))
 	}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 }
 
@@ -1847,7 +1847,7 @@ var _ = ginkgo.Describe("Preemption", func() {
 			behavioral.MustCreate(ctx, k8sClient, preemptor)
 
 			ginkgo.By("The fixed-reduction target scales the victim down to demand count rather than fully evicting it")
-			expectPreemptionTargetCount(victim, ptr.To[int32](3))
+			expectPreemptionRetainedCount(victim, ptr.To[int32](3))
 			gomega.Consistently(func(g gomega.Gomega) {
 				got := &kueue.Workload{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(victim), got)).Should(gomega.Succeed())

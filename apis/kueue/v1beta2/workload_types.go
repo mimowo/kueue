@@ -500,13 +500,24 @@ const (
 // PodSetPartialPreemptionStatus describes an in-progress partial preemption of
 // a PodSet.
 type PodSetPartialPreemptionStatus struct {
-	// targetCount is the number of Pods that the PodSet is being shrunk to.
-	// It is lower than the assignment's count and not lower than the PodSet's
-	// partialPreemption.minCount. Kueue may lower it, but never raises it.
+	// retainedCount is the number of Pods that the latest partial preemption
+	// leaves in the PodSet. It records Kueue's decision, not an observed Pod
+	// count.
+	//
+	// The shrink is in progress while the assignment's count is higher than
+	// retainedCount: Kueue evicts the Pods in excess of retainedCount. Once
+	// none of them is left, including terminating Pods, Kueue lowers count
+	// to retainedCount and resourceUsage in proportion. From then on this
+	// field stays set and has no further effect.
+	//
+	// retainedCount is at least the PodSet's
+	// partialPreemption.minRetainedCount and at most the assignment's count.
+	// Kueue may lower it for another partial preemption, but never raises it
+	// within the same admission.
 	//
 	// +required
 	// +kubebuilder:validation:Minimum=0
-	TargetCount *int32 `json:"targetCount,omitempty"`
+	RetainedCount *int32 `json:"retainedCount,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="self.slices.all(x, size(x.valuesPerLevel) == size(self.levels))", message="valuesPerLevel must have the same length as the number of levels in this TopologyAssignment"
@@ -668,12 +679,16 @@ type PodSet struct {
 
 // PodSetPartialPreemption configures partial preemption of a PodSet.
 type PodSetPartialPreemption struct {
-	// minCount is the lowest number of Pods that partial preemption may shrink
-	// the PodSet to. It does not stop Kueue from evicting the whole Workload.
+	// minRetainedCount is the minimum number of Pods that the PodSet keeps
+	// when Kueue partially preempts it. Partial preemption does not shrink
+	// the PodSet below this number.
+	//
+	// It does not prevent eviction of the whole Workload. It is independent
+	// of the PodSet's minCount, which controls partial admission.
 	//
 	// +required
 	// +kubebuilder:validation:Minimum=0
-	MinCount *int32 `json:"minCount,omitempty"`
+	MinRetainedCount *int32 `json:"minRetainedCount,omitempty"`
 }
 
 type PreemptionGate struct {

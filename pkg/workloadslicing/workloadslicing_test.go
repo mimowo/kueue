@@ -1945,8 +1945,10 @@ func TestNormalizeActiveSlices(t *testing.T) {
 						Creation(now.Add(-time.Minute)).
 						Annotation(constants.PartialPreemptionAnnotation, "true").
 						PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 3).Request(corev1.ResourceCPU, "1").Obj())).Obj()
+					admittedCount := int32(3)
+					wl.Status.Admission.PodSetAssignments[0].Count = &admittedCount
 					targetCount := int32(1)
-					wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: &targetCount}
+					wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: &targetCount}
 					return *wl
 				}(),
 				*utiltestingapi.MakeWorkload("wl-b", "ns").ResourceVersion("1").Creation(now).

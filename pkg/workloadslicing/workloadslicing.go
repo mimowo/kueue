@@ -405,7 +405,7 @@ func normalizeActiveSlices(
 	// quota-less replacement.
 	cancelPendingReplacement := pendingReplacement != nil &&
 		latestWithQuotaReservation != nil &&
-		workload.HasPendingPreemptionTargetCount(latestWithQuotaReservation)
+		workload.HasPendingPreemptionRetainedCount(latestWithQuotaReservation)
 
 	log.V(3).Info("Classified workload slices",
 		"total", len(workloads),

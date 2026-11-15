@@ -25,12 +25,11 @@ import (
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption/classical"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption/policy"
-	"sigs.k8s.io/kueue/pkg/workload"
 )
 
 type candidateIterator interface {
 	Reset()
-	Next(borrow bool) (candidate *workload.Info, evictReason string)
+	Next(borrow bool) *Target
 }
 
 // classicalPreemptionStrategy implements a heuristic to find a minimal set of Workloads
@@ -96,49 +95,98 @@ func classicalPreemptionStrategy(ctx context.Context, preemptor *Preemptor, pree
 					)
 				}
 			}
-			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx)) {
+			classicalIter := &classicalCandidateIterator{
+				preemptionCtx:  preemptionCtx,
+				classical:      candidatesGenerator,
+				allowBorrowing: allowBorrowing,
+			}
+			pl := newPlan(preemptionCtx, classicalIter, allowBorrowing, preemptor.candidatesOrdering(log, preemptionCtx.preemptorCQ.Name))
+			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx, pl)) {
 				return
 			}
 		}
 	}
 }
 
+// classicalCandidateIterator feeds plan.walk candidates without applying them to the
+// snapshot: Next returns the classical candidate as-is (PartialPreemption stays nil,
+// the workload is still fully in the snapshot). plan.walk's own YieldFromSnapshot wrap
+// is what actually mutates the snapshot, and only after walk has decided whether to
+// shrink the candidate or whole-evict it. Applying here instead would make that
+// decision impossible: partialPlan.walk reads each candidate's live snapshot state to
+// make it.
+//
+// ConfigurablePreemptions candidates are the opposite: FindCandidates applies each one
+// internally before Next returns it (its own trigger-escalation logic needs the
+// snapshot updated between candidates). plan.walk's wrap re-applying an
+// already-removed workload is a no-op (Target.Apply skips it), not a bug.
+type classicalCandidateIterator struct {
+	preemptionCtx  *preemptionCtx
+	classical      classical.CandidateIterator
+	allowBorrowing bool
+
+	configurableNext func() (*Target, bool)
+	configurableStop func()
+}
+
+func (c *classicalCandidateIterator) Reset() {
+	c.classical.Reset()
+}
+
+func (c *classicalCandidateIterator) Next(borrow bool) *Target {
+	if candidateWl, reason := c.classical.Next(borrow); candidateWl != nil {
+		return &Target{
+			WorkloadInfo: candidateWl,
+			Reason:       reason,
+			WorkloadCq:   c.preemptionCtx.snapshot.ClusterQueue(candidateWl.ClusterQueue),
+		}
+	}
+	if !features.Enabled(features.ConfigurablePreemptions) {
+		return nil
+	}
+	// TODO: So far, we have only traversed the candidate set of ConfigurablePreemptions once.
+	// Therefore, enabling PartialPreemption and ConfigurablePreemptions simultaneously is not
+	// supported for the time being.
+	if c.configurableNext == nil {
+		c.configurableNext, c.configurableStop = iter.Pull(func(yield func(*Target) bool) {
+			c.preemptionCtx.configurableEvaluator.FindCandidates(
+				c.preemptionCtx.snapshot,
+				c.preemptionCtx.frsNeedPreemption,
+				func() bool { return workloadQuotaFits(c.preemptionCtx, c.allowBorrowing) },
+				yield,
+			)
+		})
+	}
+	t, ok := c.configurableNext()
+	if !ok {
+		return nil
+	}
+	return t
+}
+
+func (c *classicalCandidateIterator) Close() {
+	if c.configurableStop != nil {
+		c.configurableStop()
+	}
+}
+
 func iterateOverCandidates(
 	ctx context.Context,
 	preemptionCtx *preemptionCtx,
-	iterator candidateIterator,
+	iterator classical.CandidateIterator,
 	allowBorrowing bool,
 	yield func(*Target) bool,
 ) (cont bool) {
 	yield = policy.YieldFromSnapshot(preemptionCtx.snapshot, yield)
-	rounds := []bool{false}
-	if features.Enabled(features.PartialPreemption) {
-		rounds = []bool{true, false}
-	}
-	for _, shrinkOnly := range rounds {
-		iterator.Reset()
-		for candidateWl, reason := iterator.Next(allowBorrowing); candidateWl != nil; candidateWl, reason = iterator.Next(allowBorrowing) {
-			cq := preemptionCtx.snapshot.ClusterQueue(candidateWl.ClusterQueue)
-			if cq == nil {
-				continue
-			}
-			current := cq.Workloads[workload.Key(candidateWl.Obj)]
-			if current == nil {
-				continue
-			}
-			var target *Target
-			if shrinkOnly {
-				target = planPreemption(candidateWl, reason)
-				if target.PartialPreemption == nil {
-					continue
-				}
-			} else {
-				target = &Target{WorkloadInfo: candidateWl, Reason: reason}
-			}
-			target.WorkloadCq = cq
-			if !yield(target) {
-				return
-			}
+	iterator.Reset()
+	for candidateWl, reason := iterator.Next(allowBorrowing); candidateWl != nil; candidateWl, reason = iterator.Next(allowBorrowing) {
+		candidate := &Target{
+			WorkloadInfo: candidateWl,
+			Reason:       reason,
+			WorkloadCq:   preemptionCtx.snapshot.ClusterQueue(candidateWl.ClusterQueue),
+		}
+		if !yield(candidate) {
+			return
 		}
 	}
 	return true

@@ -367,8 +367,8 @@ func (j *Job) PodSets(ctx context.Context, _ client.Client) ([]kueue.PodSet, err
 		Count:    j.podsCount(),
 		MinCount: j.podSetMinCount(),
 	}
-	if minCount := j.podSetPreemptionMinCount(); minCount != nil {
-		podSet.PartialPreemption = &kueue.PodSetPartialPreemption{MinCount: minCount}
+	if minCount := j.podSetPreemptionMinRetainedCount(); minCount != nil {
+		podSet.PartialPreemption = &kueue.PodSetPartialPreemption{MinRetainedCount: minCount}
 	}
 	if features.Enabled(features.TopologyAwareScheduling) {
 		topologyRequest, err := jobframeworktas.NewPodSetTopologyRequest(
@@ -448,7 +448,7 @@ func (j *Job) PodsReady(_ context.Context, _ client.Client, options ...jobframew
 			target = granted
 		}
 		if features.Enabled(features.PartialPreemption) {
-			if preemptionTarget, ok := workload.PreemptionTargetCount(wl, kueue.DefaultPodSetName); ok {
+			if preemptionTarget, ok := workload.PreemptionRetainedCount(wl, kueue.DefaultPodSetName); ok {
 				target = min(target, preemptionTarget)
 			}
 		}
@@ -498,14 +498,14 @@ func (j *Job) podSetMinCount() *int32 {
 	return j.minPodsCount()
 }
 
-// podSetPreemptionMinCount returns the partial-preemption scale-down floor read from the
-// kueue.x-k8s.io/podset-partial-preemption-min-count annotation, or nil when the feature gate is off
+// podSetPreemptionMinRetainedCount returns the partial-preemption scale-down floor read from the
+// kueue.x-k8s.io/podset-partial-preemption-min-retained-count annotation, or nil when the feature gate is off
 // or the annotation is absent or malformed.
-func (j *Job) podSetPreemptionMinCount() *int32 {
+func (j *Job) podSetPreemptionMinRetainedCount() *int32 {
 	if !features.Enabled(features.PartialPreemption) {
 		return nil
 	}
-	strVal, found := j.Spec.Template.Annotations[constants.PodSetPartialPreemptionMinCountAnnotation]
+	strVal, found := j.Spec.Template.Annotations[constants.PodSetPartialPreemptionMinRetainedCountAnnotation]
 	if !found {
 		return nil
 	}

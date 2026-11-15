@@ -2185,12 +2185,12 @@ func admittedWLMinCount(specCount, admittedCount, minCount, target int32, now ti
 			Obj(), now).
 		Obj()
 	if target > 0 {
-		workload.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: &target}
+		workload.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: &target}
 	}
 	return workload
 }
 
-func TestValidateWorkloadUpdatePartialPreemptionTargetCount(t *testing.T) {
+func TestValidateWorkloadUpdatePartialPreemptionRetainedCount(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	cases := []struct {
 		name      string

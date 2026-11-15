@@ -30,10 +30,10 @@ import (
 
 // PartialPreemptionTarget holds the parameters of a partial preemption request:
 // instead of evicting the victim entirely, Kueue asks it to scale down one PodSet
-// to TargetCount pods.
+// to RetainedCount pods.
 type PartialPreemptionTarget struct {
-	PodSet      kueue.PodSetReference
-	TargetCount int32
+	PodSet        kueue.PodSetReference
+	RetainedCount int32
 	// ReducedInfo represents the victim after the requested scale-down.
 	ReducedInfo *workload.Info
 }

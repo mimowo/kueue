@@ -82,7 +82,7 @@ func expectPodCounts(ctx context.Context, namespace, podNamePrefix string, podSe
 
 // This exercises the full reactive partial-preemption loop for batch/Job, end to end:
 //
-//	request  - the scheduler sets PreemptionTargetCount when the preemptor arrives,
+//	request  - the scheduler sets PreemptionRetainedCount when the preemptor arrives,
 //	drain    - the Job reconciler evicts the victim's excess Pods down to the target,
 //	release  - the ungater lowers the admitted count and flips PartiallyPreempted to QuotaReleased,
 //	admit    - the freed quota admits the preemptor,
@@ -141,7 +141,7 @@ var _ = ginkgo.Describe("Job partial preemption", ginkgo.Ordered, ginkgo.Continu
 			Queue(kueue.LocalQueueName(lq.Name)).
 			SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
 			SetAnnotation(pkgconstants.PartialPreemptionAnnotation, "true").
-			SetAnnotation(pkgconstants.PodSetPartialPreemptionMinCountAnnotation, "1").
+			PodAnnotation(pkgconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "1").
 			Indexed(true).
 			Request(corev1.ResourceCPU, "1").
 			Parallelism(parallelism).
@@ -194,7 +194,7 @@ var _ = ginkgo.Describe("Job partial preemption", ginkgo.Ordered, ginkgo.Continu
 			gomega.Eventually(func(g gomega.Gomega) {
 				wl := &kueue.Workload{}
 				g.Expect(k8sClient.Get(ctx, victimWlKey, wl)).Should(gomega.Succeed())
-				got, ok := workload.PreemptionTargetCount(wl, podSet)
+				got, ok := workload.PreemptionRetainedCount(wl, podSet)
 				g.Expect(ok).Should(gomega.BeTrue())
 				g.Expect(got).Should(gomega.Equal(target))
 				cond := meta.FindStatusCondition(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted)
@@ -221,10 +221,13 @@ var _ = ginkgo.Describe("Job partial preemption", ginkgo.Ordered, ginkgo.Continu
 				g.Expect(cond.Status).Should(gomega.Equal(metav1.ConditionFalse))
 				g.Expect(cond.Reason).Should(gomega.Equal(kueue.WorkloadPartiallyPreemptedReasonQuotaReleased))
 				// Reactive downscaling releases quota by lowering the admitted count to the target
-				// and clearing the reclaim target (not by reporting reclaimablePods).
+				// (not by reporting reclaimablePods). The reclaim target is no longer cleared once
+				// satisfied; the release is observable as the used count falling to it.
 				g.Expect(wl.Status.Admission.PodSetAssignments[0].Count).Should(gomega.HaveValue(gomega.Equal(target)))
-				_, hasTarget := workload.PreemptionTargetCount(wl, podSet)
-				g.Expect(hasTarget).Should(gomega.BeFalse())
+				retained, hasTarget := workload.PreemptionRetainedCount(wl, podSet)
+				g.Expect(hasTarget).Should(gomega.BeTrue())
+				used := workload.ExtractGrantedPodSetCounts(wl)[podSet]
+				g.Expect(used).Should(gomega.BeNumerically("<=", retained))
 			}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 		})
 
@@ -293,7 +296,7 @@ var _ = ginkgo.Describe("Job partial preemption", ginkgo.Ordered, ginkgo.Continu
 				Queue(kueue.LocalQueueName(lq.Name)).
 				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
 				SetAnnotation(pkgconstants.PartialPreemptionAnnotation, "true").
-				SetAnnotation(pkgconstants.PodSetPartialPreemptionMinCountAnnotation, strconv.Itoa(int(minCount))).
+				PodAnnotation(pkgconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, strconv.Itoa(int(minCount))).
 				Indexed(true).
 				Request(corev1.ResourceCPU, "1").
 				Parallelism(parallelism).

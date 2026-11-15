@@ -23,10 +23,14 @@ package v1beta2
 //
 // PodSetPartialPreemption configures partial preemption of a PodSet.
 type PodSetPartialPreemptionApplyConfiguration struct {
-	// minCount is the lowest number of Pods that partial preemption may shrink
-	// the PodSet to. It does not stop Kueue from evicting the whole Workload.
+	// minRetainedCount is the minimum number of Pods that the PodSet keeps
+	// when Kueue partially preempts it. Partial preemption does not shrink
+	// the PodSet below this number.
 	//
-	MinCount *int32 `json:"minCount,omitempty"`
+	// It does not prevent eviction of the whole Workload. It is independent
+	// of the PodSet's minCount, which controls partial admission.
+	//
+	MinRetainedCount *int32 `json:"minRetainedCount,omitempty"`
 }
 
 // PodSetPartialPreemptionApplyConfiguration constructs a declarative configuration of the PodSetPartialPreemption type for use with
@@ -35,10 +39,10 @@ func PodSetPartialPreemption() *PodSetPartialPreemptionApplyConfiguration {
 	return &PodSetPartialPreemptionApplyConfiguration{}
 }
 
-// WithMinCount sets the MinCount field in the declarative configuration to the given value
+// WithMinRetainedCount sets the MinRetainedCount field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the MinCount field is set to the value of the last call.
-func (b *PodSetPartialPreemptionApplyConfiguration) WithMinCount(value int32) *PodSetPartialPreemptionApplyConfiguration {
-	b.MinCount = &value
+// If called multiple times, the MinRetainedCount field is set to the value of the last call.
+func (b *PodSetPartialPreemptionApplyConfiguration) WithMinRetainedCount(value int32) *PodSetPartialPreemptionApplyConfiguration {
+	b.MinRetainedCount = &value
 	return b
 }

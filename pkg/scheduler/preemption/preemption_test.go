@@ -5231,9 +5231,9 @@ func TestPreemptionWithPodsQuota(t *testing.T) {
 
 func TestPartialPreemptionGetTargets(t *testing.T) {
 	type wantTarget struct {
-		partial               bool
-		preemptionTargetCount int32
-		reducedCount          *int32
+		partial                 bool
+		preemptionRetainedCount int32
+		reducedCount            *int32
 	}
 	cases := map[string]struct {
 		gateDisabled bool
@@ -5247,7 +5247,7 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			quota:    "6",
 			victims:  []*kueue.Workload{partialPreemptionVictim("victim", 0, 5, 1, nil)},
 			incoming: utiltestingapi.MakeWorkload("in", "").UID("wl-in").Priority(1).Request(corev1.ResourceCPU, "4").Obj(),
-			want:     map[string]wantTarget{"victim": {partial: true, preemptionTargetCount: 2}},
+			want:     map[string]wantTarget{"victim": {partial: true, preemptionRetainedCount: 2}},
 		},
 		"gate off: whole eviction": {
 			gateDisabled: true,
@@ -5266,7 +5266,7 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			quota:    "20",
 			victims:  []*kueue.Workload{partialPreemptionVictim("victim", 0, 20, 5, nil)},
 			incoming: utiltestingapi.MakeWorkload("incoming", "").UID("incoming").Priority(1).Request(corev1.ResourceCPU, "10").Obj(),
-			want:     map[string]wantTarget{"victim": {partial: true, preemptionTargetCount: 10}},
+			want:     map[string]wantTarget{"victim": {partial: true, preemptionRetainedCount: 10}},
 		},
 		"multiple candidates each partially reduced": {
 			quota: "10",
@@ -5276,8 +5276,8 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			},
 			incoming: utiltestingapi.MakeWorkload("in", "").UID("wl-in").Priority(1).Request(corev1.ResourceCPU, "2").Obj(),
 			want: map[string]wantTarget{
-				"v1": {partial: true, preemptionTargetCount: 4},
-				"v2": {partial: true, preemptionTargetCount: 4},
+				"v1": {partial: true, preemptionRetainedCount: 4},
+				"v2": {partial: true, preemptionRetainedCount: 4},
 			},
 		},
 		"round-two merge preserves priority for a whole-only candidate": {
@@ -5289,8 +5289,8 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			},
 			incoming: utiltestingapi.MakeWorkload("incoming", "").UID("incoming").Priority(40).Request(corev1.ResourceCPU, "12").Obj(),
 			want: map[string]wantTarget{
-				"H1": {partial: true, preemptionTargetCount: 2},
-				"M1": {partial: true, preemptionTargetCount: 1},
+				"H1": {partial: true, preemptionRetainedCount: 2},
+				"M1": {partial: true, preemptionRetainedCount: 1},
 				"L1": {partial: false},
 			},
 			wantOrder: []string{"L1", "M1", "H1"},
@@ -5303,7 +5303,7 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			},
 			incoming: utiltestingapi.MakeWorkload("incoming", "").UID("incoming").Priority(1).Request(corev1.ResourceCPU, "8").Obj(),
 			want: map[string]wantTarget{
-				"victim-a": {partial: true, preemptionTargetCount: 2},
+				"victim-a": {partial: true, preemptionRetainedCount: 2},
 				"victim-b": {partial: false},
 			},
 		},
@@ -5381,14 +5381,14 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 					continue
 				}
 				if target.PartialPreemption == nil {
-					t.Errorf("target %q: PartialPreemption = nil, want partial scale-down to %d", victimName, want.preemptionTargetCount)
+					t.Errorf("target %q: PartialPreemption = nil, want partial scale-down to %d", victimName, want.preemptionRetainedCount)
 					continue
 				}
 				if got, wantPS := target.PartialPreemption.PodSet, kueue.PodSetReference("executor"); got != wantPS {
 					t.Errorf("target %q: PartialPreemption.PodSet = %q, want %q", victimName, got, wantPS)
 				}
-				if got := target.PartialPreemption.TargetCount; got != want.preemptionTargetCount {
-					t.Errorf("target %q: PreemptionTargetCount = %d, want %d", victimName, got, want.preemptionTargetCount)
+				if got := target.PartialPreemption.RetainedCount; got != want.preemptionRetainedCount {
+					t.Errorf("target %q: PreemptionRetainedCount = %d, want %d", victimName, got, want.preemptionRetainedCount)
 				}
 				if want.reducedCount != nil {
 					if target.PartialPreemption.ReducedInfo == nil {
@@ -5508,8 +5508,8 @@ func admittedTargetCount(wl *kueue.Workload, podSet kueue.PodSetReference) (int3
 	}
 	for i := range wl.Status.Admission.PodSetAssignments {
 		psa := &wl.Status.Admission.PodSetAssignments[i]
-		if psa.Name == podSet && psa.PartialPreemption.TargetCount != nil {
-			return *psa.PartialPreemption.TargetCount, true
+		if psa.Name == podSet && psa.PartialPreemption.RetainedCount != nil {
+			return *psa.PartialPreemption.RetainedCount, true
 		}
 	}
 	return 0, false
@@ -5539,9 +5539,9 @@ func partialPreemptionClusterQueue(cpuQuota string) *kueue.ClusterQueue {
 }
 
 // partialPreemptionVictim builds an elastic victim admitted at usedCount replicas with
-// the given minimum count. When preemptionTargetCount is non-nil it seeds the executor
+// the given minimum count. When preemptionRetainedCount is non-nil it seeds the executor
 // assignment with an in-flight scale-down request (as a prior preemption round would).
-func partialPreemptionVictim(name string, priorityValue, usedCount, minCount int32, preemptionTargetCount *int32) *kueue.Workload {
+func partialPreemptionVictim(name string, priorityValue, usedCount, minCount int32, preemptionRetainedCount *int32) *kueue.Workload {
 	wl := utiltestingapi.MakeWorkload(name, "").
 		UID(types.UID(name)).
 		Annotation(constants.PartialPreemptionAnnotation, "true").
@@ -5557,8 +5557,8 @@ func partialPreemptionVictim(name string, priorityValue, usedCount, minCount int
 				Obj()).
 			Obj(), time.Now()).
 		Obj()
-	if preemptionTargetCount != nil {
-		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: preemptionTargetCount}
+	if preemptionRetainedCount != nil {
+		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: preemptionRetainedCount}
 	}
 	return wl
 }
@@ -5600,6 +5600,162 @@ func getPartialPreemptionTargets(t *testing.T, now time.Time, cq *kueue.ClusterQ
 		corev1.ResourceCPU: &flavorassigner.FlavorAssignment{Name: "default", Mode: flavorassigner.Preempt},
 	}))
 	return preemptor.GetTargetsWithStrategy(ctx, strategies)
+}
+
+// partialPreemptionVictimInCQ is like partialPreemptionVictim, but admits the victim
+// into cq instead of the fixed "standalone" ClusterQueue, for scenarios that need more
+// than one ClusterQueue (e.g. a cohort with borrowing).
+func partialPreemptionVictimInCQ(cq kueue.ClusterQueueReference, name string, priorityValue, usedCount, minCount int32) *kueue.Workload {
+	return utiltestingapi.MakeWorkload(name, "").
+		UID(types.UID(name)).
+		Annotation(constants.PartialPreemptionAnnotation, "true").
+		Priority(priorityValue).
+		PodSets(*utiltestingapi.MakePodSet("executor", int(usedCount)).
+			Request(corev1.ResourceCPU, "1").
+			SetPreemptionMinimumCount(minCount).
+			Obj()).
+		ReserveQuotaAt(utiltestingapi.MakeAdmission(cq).
+			PodSets(utiltestingapi.MakePodSetAssignment("executor").
+				Assignment(corev1.ResourceCPU, "default", fmt.Sprintf("%d", usedCount)).
+				Count(usedCount).
+				Obj()).
+			Obj(), time.Now()).
+		Obj()
+}
+
+func getPartialPreemptionTargetsForCohort(
+	t *testing.T,
+	now time.Time,
+	cqs []*kueue.ClusterQueue,
+	victims []*kueue.Workload,
+	incoming *kueue.Workload,
+	incomingCQ kueue.ClusterQueueReference,
+) []*Target {
+	t.Helper()
+	ctx, log := utiltesting.ContextWithLog(t)
+	items := make([]kueue.Workload, len(victims))
+	for i := range victims {
+		items[i] = *victims[i]
+	}
+	cl := utiltesting.NewClientBuilder().
+		WithLists(&kueue.WorkloadList{Items: items}).
+		WithStatusSubresource(&kueue.Workload{}).
+		Build()
+	cqCache := schdcache.New(cl)
+	cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
+	for _, cq := range cqs {
+		if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
+			t.Fatalf("Couldn't add ClusterQueue %q to cache: %v", cq.Name, err)
+		}
+	}
+	preemptor := New(
+		cl,
+		workload.Ordering{},
+		&utiltesting.EventRecorder{},
+		nil,
+		false,
+		clocktesting.NewFakeClock(now),
+		nil,
+		preemptexpectations.New(),
+		nil,
+	)
+	snapshot, err := cqCache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error while building snapshot: %v", err)
+	}
+	wlInfo := workload.NewInfo(log, incoming)
+	wlInfo.ClusterQueue = incomingCQ
+	strategies := preemptor.GetPreemptionStrategyIterator(ctx, *wlInfo, snapshot, singlePodSetAssignment(flavorassigner.ResourceAssignment{
+		corev1.ResourceCPU: &flavorassigner.FlavorAssignment{Name: "default", Mode: flavorassigner.Preempt},
+	}))
+	return preemptor.GetTargetsWithStrategy(ctx, strategies)
+}
+
+// TestPartialPreemptionFillBackCohort1Regression covers cohort "coh1": P nominal
+// 8, A nominal 2, B nominal 0 (10 total). A is used at 4 (floor 2), B at 4
+// (floor 3). Whole-evicting B and shrinking A to its floor frees 4+2=6 on top
+// of the 0 already free, more than P's request of 7 needs; fillBack must grow
+// A back from its floor (2) to 3, the largest count that still fits.
+func TestPartialPreemptionFillBackCohort1Regression(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
+
+	cqs := []*kueue.ClusterQueue{
+		utiltestingapi.MakeClusterQueue("P").Cohort("coh1").
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "8").Obj()).
+			Preemption(kueue.ClusterQueuePreemption{ReclaimWithinCohort: kueue.PreemptionPolicyAny}).
+			Obj(),
+		utiltestingapi.MakeClusterQueue("A").Cohort("coh1").
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "2").Obj()).
+			Obj(),
+		utiltestingapi.MakeClusterQueue("B").Cohort("coh1").
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "0").Obj()).
+			Obj(),
+	}
+	victims := []*kueue.Workload{
+		partialPreemptionVictimInCQ("A", "a1", 0, 4, 2),
+		partialPreemptionVictimInCQ("B", "b1", 0, 4, 3),
+	}
+	incoming := utiltestingapi.MakeWorkload("p1", "").UID("p1").Request(corev1.ResourceCPU, "7").Obj()
+
+	targets := getPartialPreemptionTargetsForCohort(t, time.Now(), cqs, victims, incoming, "P")
+
+	byName := make(map[string]*Target, len(targets))
+	for _, target := range targets {
+		byName[target.WorkloadInfo.Obj.Name] = target
+	}
+	if b1 := byName["b1"]; b1 == nil || b1.PartialPreemption != nil {
+		t.Errorf("b1: want a whole-eviction target, got %+v", b1)
+	}
+	a1 := byName["a1"]
+	if a1 == nil || a1.PartialPreemption == nil {
+		t.Fatalf("a1: want a partial target, got %+v", a1)
+	}
+	if got := a1.PartialPreemption.RetainedCount; got != 3 {
+		t.Errorf("a1: RetainedCount = %d, want 3 (fillBack should grow past the floor of 2)", got)
+	}
+}
+
+// TestPartialPreemptionFillBackCohort2Regression covers cohort "coh2": P
+// nominal 8, A nominal 5, borrowing limit 20 (13 total). A is used at 10
+// (floor 5, equal to its nominal). P requests 11.
+func TestPartialPreemptionFillBackCohort2Regression(t *testing.T) {
+	now := time.Now()
+	cqs := func() []*kueue.ClusterQueue {
+		return []*kueue.ClusterQueue{
+			utiltestingapi.MakeClusterQueue("P2").Cohort("coh2").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "8").Obj()).
+				Preemption(kueue.ClusterQueuePreemption{
+					ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+					BorrowWithinCohort:  &kueue.BorrowWithinCohort{Policy: kueue.BorrowWithinCohortPolicyLowerPriority},
+				}).
+				Obj(),
+			utiltestingapi.MakeClusterQueue("A2").Cohort("coh2").
+				ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "5", "20").Obj()).
+				Obj(),
+		}
+	}
+	victims := func() []*kueue.Workload {
+		return []*kueue.Workload{partialPreemptionVictimInCQ("A2", "a2", 0, 10, 5)}
+	}
+	incoming := func() *kueue.Workload {
+		return utiltestingapi.MakeWorkload("p2", "").UID("p2").Priority(10).Request(corev1.ResourceCPU, "11").Obj()
+	}
+
+	t.Run("gate off succeeds with a single whole eviction", func(t *testing.T) {
+		features.SetFeatureGateDuringTest(t, features.PartialPreemption, false)
+		targets := getPartialPreemptionTargetsForCohort(t, now, cqs(), victims(), incoming(), "P2")
+		if len(targets) != 1 || targets[0].WorkloadInfo.Obj.Name != "a2" || targets[0].PartialPreemption != nil {
+			t.Fatalf("want a single whole eviction of a2, got %+v", targets)
+		}
+	})
+
+	t.Run("gate on finds no targets, because shrinking to nominal prunes the only candidate", func(t *testing.T) {
+		features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
+		targets := getPartialPreemptionTargetsForCohort(t, now, cqs(), victims(), incoming(), "P2")
+		if len(targets) != 0 {
+			t.Errorf("want no targets (the shrink to nominal prunes a2 from further escalation), got %+v", targets)
+		}
+	})
 }
 
 func setupPreemptionStrategy(t *testing.T, incomingCPU string) (PreemptionStrategy, *schdcache.Snapshot) {

@@ -65,7 +65,7 @@ func TestIsPartialPreemptionJob(t *testing.T) {
 	}
 }
 
-func TestPreemptionTargetCount(t *testing.T) {
+func TestPreemptionRetainedCount(t *testing.T) {
 	wl := utiltesting.MakeWorkload("wl", "ns").
 		PodSets(*utiltesting.MakePodSet("main", 10).Request(corev1.ResourceCPU, "1").Obj()).
 		Obj()
@@ -77,7 +77,7 @@ func TestPreemptionTargetCount(t *testing.T) {
 				Obj(),
 		).
 		Obj()
-	wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: ptr.To[int32](7)}
+	wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: ptr.To[int32](7)}
 
 	cases := map[string]struct {
 		name      kueue.PodSetReference
@@ -98,15 +98,15 @@ func TestPreemptionTargetCount(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			gotCount, gotOk := PreemptionTargetCount(wl, tc.name)
+			gotCount, gotOk := PreemptionRetainedCount(wl, tc.name)
 			if gotCount != tc.wantCount || gotOk != tc.wantOk {
-				t.Errorf("PreemptionTargetCount(%q) = (%d, %t), want (%d, %t)", tc.name, gotCount, gotOk, tc.wantCount, tc.wantOk)
+				t.Errorf("PreemptionRetainedCount(%q) = (%d, %t), want (%d, %t)", tc.name, gotCount, gotOk, tc.wantCount, tc.wantOk)
 			}
 		})
 	}
 }
 
-func TestHasPendingPreemptionTargetCount(t *testing.T) {
+func TestHasPendingPreemptionRetainedCount(t *testing.T) {
 	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
 
 	// The active release path lowers spec.Count (synced from job parallelism) and/or reports
@@ -128,7 +128,7 @@ func TestHasPendingPreemptionTargetCount(t *testing.T) {
 				Obj()
 		}
 		if target != nil && wl.Status.Admission != nil {
-			wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: target}
+			wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: target}
 		}
 		if reclaimable > 0 {
 			wl.Status.ReclaimablePods = []kueue.ReclaimablePod{{Name: "executor", Count: reclaimable}}
@@ -186,8 +186,8 @@ func TestHasPendingPreemptionTargetCount(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			features.SetFeatureGateDuringTest(t, features.ReclaimablePods, tc.reclaimablePodsGate)
-			if got := HasPendingPreemptionTargetCount(makeWorkload(tc.admitted, tc.specCount, tc.reclaimable, tc.target)); got != tc.want {
-				t.Fatalf("HasPendingPreemptionTargetCount() = %t, want %t", got, tc.want)
+			if got := HasPendingPreemptionRetainedCount(makeWorkload(tc.admitted, tc.specCount, tc.reclaimable, tc.target)); got != tc.want {
+				t.Fatalf("HasPendingPreemptionRetainedCount() = %t, want %t", got, tc.want)
 			}
 		})
 	}

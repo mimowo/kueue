@@ -498,12 +498,12 @@ func validateAdmissionUpdate(new, old *kueue.Admission, path *field.Path) field.
 
 			oldCount := ptr.Deref(op.Count, 0)
 			hasPendingPartialPreemption := op.PartialPreemption != nil &&
-				op.PartialPreemption.TargetCount != nil &&
-				*op.PartialPreemption.TargetCount < oldCount
-			if np.PartialPreemption != nil && np.PartialPreemption.TargetCount != nil && *np.PartialPreemption.TargetCount > ptr.Deref(np.Count, 0) {
+				op.PartialPreemption.RetainedCount != nil &&
+				*op.PartialPreemption.RetainedCount < oldCount
+			if np.PartialPreemption != nil && np.PartialPreemption.RetainedCount != nil && *np.PartialPreemption.RetainedCount > ptr.Deref(np.Count, 0) {
 				allErrs = append(allErrs, field.Invalid(
 					path.Child("podSetAssignments").Index(i).Child("partialPreemption", "targetCount"),
-					*np.PartialPreemption.TargetCount,
+					*np.PartialPreemption.RetainedCount,
 					fmt.Sprintf("should be less than or equal to count (%d)", ptr.Deref(np.Count, 0))))
 				continue
 			}

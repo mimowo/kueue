@@ -1648,7 +1648,7 @@ func TestUngaterReleasesReclaimedQuota(t *testing.T) {
 			).
 			AdmittedAt(true, now).
 			Obj()
-		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: new(target)}
+		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: new(target)}
 		workload.SetPartiallyPreemptedCondition(wl, now, true, kueue.InClusterQueueReason, "requested scale-down")
 		return wl
 	}

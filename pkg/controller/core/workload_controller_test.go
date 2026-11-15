@@ -4163,19 +4163,19 @@ func TestReconcileScaleDown(t *testing.T) {
 			AdmittedAt(true, now).
 			Obj()
 		tgt := target
-		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{TargetCount: &tgt}
+		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: &tgt}
 		workload.SetPartiallyPreemptedCondition(wl, now, true, kueue.InClusterQueueReason, "scale-down")
 		return wl
 	}
 
 	cases := map[string]struct {
-		admitCount  int32
-		target      int32
-		wantChanged bool
-		wantCleared bool
+		admitCount    int32
+		target        int32
+		wantChanged   bool
+		wantCompleted bool
 	}{
-		"admitted count reached target clears target and releases quota": {admitCount: 2, target: 2, wantChanged: true, wantCleared: true},
-		"admitted count still above target keeps the target":             {admitCount: 4, target: 2, wantChanged: false, wantCleared: false},
+		"admitted count reached target marks preemption complete": {admitCount: 2, target: 2, wantChanged: true, wantCompleted: true},
+		"admitted count still above target keeps it in progress":  {admitCount: 4, target: 2, wantChanged: false, wantCompleted: false},
 	}
 
 	for name, tc := range cases {
@@ -4197,14 +4197,18 @@ func TestReconcileScaleDown(t *testing.T) {
 			if err := kClient.Get(ctx, client.ObjectKeyFromObject(wl), &got); err != nil {
 				t.Fatalf("get workload: %v", err)
 			}
-			cleared := got.Status.Admission.PodSetAssignments[0].PartialPreemption == nil
-			if cleared != tc.wantCleared {
-				t.Errorf("target cleared = %v, want %v", cleared, tc.wantCleared)
+			// retainedCount is always left in place; completion is signalled by the condition.
+			if got.Status.Admission.PodSetAssignments[0].PartialPreemption == nil {
+				t.Error("PartialPreemption status should not be cleared")
 			}
-			if tc.wantCleared {
-				cond := apimeta.FindStatusCondition(got.Status.Conditions, kueue.WorkloadPartiallyPreempted)
+			cond := apimeta.FindStatusCondition(got.Status.Conditions, kueue.WorkloadPartiallyPreempted)
+			if tc.wantCompleted {
 				if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != kueue.WorkloadPartiallyPreemptedReasonQuotaReleased {
 					t.Errorf("PartiallyPreempted condition = %v, want False/QuotaReleased", cond)
+				}
+			} else {
+				if cond == nil || cond.Status != metav1.ConditionTrue {
+					t.Errorf("PartiallyPreempted condition = %v, want True/in-progress", cond)
 				}
 			}
 		})

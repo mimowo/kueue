@@ -153,7 +153,7 @@ func (r *elasticJobUngater) Reconcile(ctx context.Context, req reconcile.Request
 	// is in flight, following the drained Pods down to the target takes priority, and it must run
 	// even on reconciles where nothing is left to ungate. The over-target Pods are evicted by the
 	// job integration, not here.
-	if features.Enabled(features.PartialPreemption) && workload.HasPendingPreemptionTargetCount(active) {
+	if features.Enabled(features.PartialPreemption) && workload.HasPendingPreemptionRetainedCount(active) {
 		if err := r.releaseReclaimedQuota(ctx, active, ungatedPerPodSet); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -325,7 +325,7 @@ func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload
 		// it stay gated.
 		ungateCap := granted[ps]
 		if features.Enabled(features.PartialPreemption) {
-			if target, ok := workload.PreemptionTargetCount(wl, ps); ok && target < ungateCap {
+			if target, ok := workload.PreemptionRetainedCount(wl, ps); ok && target < ungateCap {
 				ungateCap = target
 			}
 		}
@@ -363,10 +363,10 @@ func (r *elasticJobUngater) releaseReclaimedQuota(ctx context.Context, wl *kueue
 		updated := false
 		for i := range wl.Status.Admission.PodSetAssignments {
 			psa := &wl.Status.Admission.PodSetAssignments[i]
-			if psa.PartialPreemption == nil || psa.PartialPreemption.TargetCount == nil {
+			if psa.PartialPreemption == nil || psa.PartialPreemption.RetainedCount == nil {
 				continue
 			}
-			target := *psa.PartialPreemption.TargetCount
+			target := *psa.PartialPreemption.RetainedCount
 			admitCount := ptr.Deref(psa.Count, target)
 			// The newCount must not be less than target to prevent some Pods from
 			// being killed or failing unexpectedly.

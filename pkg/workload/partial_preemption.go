@@ -46,12 +46,12 @@ func PartialPreemptionPodSet(wl *kueue.Workload, requests []PodSetResources) (ku
 	var shrinkablePodSet kueue.PodSetReference
 	for i := range wl.Spec.PodSets {
 		ps := &wl.Spec.PodSets[i]
-		if ps.PartialPreemption == nil || ps.PartialPreemption.MinCount == nil {
+		if ps.PartialPreemption == nil || ps.PartialPreemption.MinRetainedCount == nil {
 			continue
 		}
 		for j := range requests {
 			psr := &requests[j]
-			if psr.Name != ps.Name || psr.Count <= *ps.PartialPreemption.MinCount {
+			if psr.Name != ps.Name || psr.Count <= *ps.PartialPreemption.MinRetainedCount {
 				continue
 			}
 			if psr.TopologyRequest != nil || shrinkablePodSet != "" {
@@ -63,73 +63,64 @@ func PartialPreemptionPodSet(wl *kueue.Workload, requests []PodSetResources) (ku
 	return shrinkablePodSet, shrinkablePodSet != ""
 }
 
-// HasPendingPreemptionTargetCount reports whether any admitted PodSet still has an in-flight
+// HasPendingPreemptionRetainedCount reports whether any admitted PodSet still has an in-flight
 // partial-preemption reclaim target above its current effective count.
-func HasPendingPreemptionTargetCount(wl *kueue.Workload) bool {
+func HasPendingPreemptionRetainedCount(wl *kueue.Workload) bool {
 	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil {
 		return false
 	}
 	effectiveCounts := podSetsCountsAfterReclaim(wl)
 	for i := range wl.Status.Admission.PodSetAssignments {
 		psa := &wl.Status.Admission.PodSetAssignments[i]
-		if psa.PartialPreemption == nil || psa.PartialPreemption.TargetCount == nil {
+		if psa.PartialPreemption == nil || psa.PartialPreemption.RetainedCount == nil {
 			continue
 		}
-		if effectiveCounts[psa.Name] > *psa.PartialPreemption.TargetCount {
+		effective := min(effectiveCounts[psa.Name], ptr.Deref(psa.Count, effectiveCounts[psa.Name]))
+		if effective > *psa.PartialPreemption.RetainedCount {
 			return true
 		}
 	}
 	return false
 }
 
-// PreemptionTargetCount returns the requested partial-preemption target count for the named PodSet.
-func PreemptionTargetCount(wl *kueue.Workload, podSetName kueue.PodSetReference) (int32, bool) {
+// PreemptionRetainedCount returns the requested partial-preemption target count for the named PodSet.
+func PreemptionRetainedCount(wl *kueue.Workload, podSetName kueue.PodSetReference) (int32, bool) {
 	if wl.Status.Admission == nil {
 		return 0, false
 	}
 	for i := range wl.Status.Admission.PodSetAssignments {
 		psa := &wl.Status.Admission.PodSetAssignments[i]
-		if psa.Name == podSetName && psa.PartialPreemption != nil && psa.PartialPreemption.TargetCount != nil {
-			return *psa.PartialPreemption.TargetCount, true
+		if psa.Name == podSetName && psa.PartialPreemption != nil && psa.PartialPreemption.RetainedCount != nil {
+			return *psa.PartialPreemption.RetainedCount, true
 		}
 	}
 	return 0, false
 }
 
-// PreemptionMinCount returns the configured partial-preemption floor for the named PodSet.
-func PreemptionMinCount(wl *kueue.Workload, podSetName kueue.PodSetReference) (int32, bool) {
+// PreemptionMinRetainedCount returns the configured partial-preemption floor for the named PodSet.
+func PreemptionMinRetainedCount(wl *kueue.Workload, podSetName kueue.PodSetReference) (int32, bool) {
 	for i := range wl.Spec.PodSets {
 		ps := &wl.Spec.PodSets[i]
-		if ps.Name == podSetName && ps.PartialPreemption != nil && ps.PartialPreemption.MinCount != nil {
-			return *ps.PartialPreemption.MinCount, true
+		if ps.Name == podSetName && ps.PartialPreemption != nil && ps.PartialPreemption.MinRetainedCount != nil {
+			return *ps.PartialPreemption.MinRetainedCount, true
 		}
 	}
 	return 0, false
 }
 
-// ReleaseSatisfiedPreemptionTargets clears fulfilled reclaim requests and updates
-// the partial-preemption condition after quota has been released.
+// ReleaseSatisfiedPreemptionTargets updates the partial-preemption condition after
+// all reclaim targets have been reached. The retainedCount field is intentionally
+// left in place: it records Kueue's decision and has no further effect once
+// count <= retainedCount.
 func ReleaseSatisfiedPreemptionTargets(wl *kueue.Workload, now time.Time) bool {
 	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil || !meta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) {
 		return false
 	}
-	updated := false
-	effectiveCounts := podSetsCountsAfterReclaim(wl)
-	for i := range wl.Status.Admission.PodSetAssignments {
-		psa := &wl.Status.Admission.PodSetAssignments[i]
-		if psa.PartialPreemption == nil || psa.PartialPreemption.TargetCount == nil {
-			continue
-		}
-		effective := min(effectiveCounts[psa.Name], ptr.Deref(psa.Count, effectiveCounts[psa.Name]))
-		if effective <= *psa.PartialPreemption.TargetCount {
-			psa.PartialPreemption = nil
-			updated = true
-		}
+	if HasPendingPreemptionRetainedCount(wl) {
+		return false
 	}
-	if updated && !HasPendingPreemptionTargetCount(wl) {
-		SetPartiallyPreemptedCondition(wl, now, false,
-			kueue.WorkloadPartiallyPreemptedReasonQuotaReleased,
-			"Partial-preemption reclaim target satisfied; quota released")
-	}
-	return updated
+	SetPartiallyPreemptedCondition(wl, now, false,
+		kueue.WorkloadPartiallyPreemptedReasonQuotaReleased,
+		"Partial-preemption reclaim target satisfied; quota released")
+	return true
 }
