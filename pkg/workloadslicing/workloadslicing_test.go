@@ -1241,7 +1241,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 					Obj(),
 			},
 		},
-		"OneWorkloadSlice_PatchFailure": {
+		"OneWorkloadSlice_UpdateFailure": {
 			args: args{
 				clnt: testWorkloadClientBuilder().WithObjects(
 					utiltestingapi.MakeWorkload(testJobObject.Name+"-1", testJobObject.Namespace).
@@ -1249,7 +1249,7 @@ func TestEnsureWorkloadSlices(t *testing.T) {
 						ResourceVersion("1").
 						PodSets(*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 3).Request(corev1.ResourceCPU, "1").Obj()).
 						Obj()).WithInterceptorFuncs(interceptor.Funcs{
-					Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 						return errTest
 					}}).Build(),
 				jobPodSets:   []kueue.PodSet{*utiltestingapi.MakePodSet(kueue.DefaultPodSetName, 1).Request(corev1.ResourceCPU, "1").Obj()},
@@ -1934,9 +1934,6 @@ func TestNormalizeActiveSlices(t *testing.T) {
 			},
 			want: want{survivor: "wl-d", keptAdmitted: "wl-c"},
 		},
-		// Neither holds a reservation, so the survivor is the latest one. The
-		// caller passes these already sorted with a UID tie-break, so the last
-		// is the latest even when both were created in the same second.
 		"admitted with pending reclaim target + pending replacement, cancel replacement and keep admitted": {
 			partialPreemption: true,
 			workloads: []kueue.Workload{
@@ -1957,6 +1954,9 @@ func TestNormalizeActiveSlices(t *testing.T) {
 			},
 			want: want{survivor: "wl-a", deleted: "wl-b"},
 		},
+		// Neither holds a reservation, so the survivor is the latest one. The
+		// caller passes these already sorted with a UID tie-break, so the last
+		// is the latest even when both were created in the same second.
 		"two pending slices created in the same second": {
 			workloads: []kueue.Workload{
 				*utiltestingapi.MakeWorkload("wl-a", "ns").ResourceVersion("1").Creation(now).
@@ -2221,7 +2221,7 @@ func TestReplacedWorkloadSlice(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			features.SetFeatureGatesDuringTest(t, tt.featureGates)
 			targets, wl := ReplacedWorkloadSlice(tt.args.wl, tt.args.snap)
-			if diff := cmp.Diff(tt.want.targets, targets, cmpopts.IgnoreUnexported(preemption.Target{})); diff != "" {
+			if diff := cmp.Diff(tt.want.targets, targets); diff != "" {
 				t.Errorf("ReplacedWorkloadSlice() targets (+want,-got):\n%s", diff)
 			}
 			if diff := cmp.Diff(tt.want.wl, wl); diff != "" {

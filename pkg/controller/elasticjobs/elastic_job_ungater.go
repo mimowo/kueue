@@ -153,7 +153,7 @@ func (r *elasticJobUngater) Reconcile(ctx context.Context, req reconcile.Request
 	// is in flight, following the drained Pods down to the retained count takes priority,
 	// and it must run even on reconciles where nothing is left to ungate. The Pods above
 	// the retained count are evicted by the job integration, not here.
-	if features.Enabled(features.PartialPreemption) && workload.HasPendingPreemptionRetainedCount(active) {
+	if workload.HasPendingPartialPreemption(active) {
 		if err := r.releaseReclaimedQuota(ctx, active, ungatedPerPodSet); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -278,16 +278,22 @@ func refreshPodAdmission(pod *corev1.Pod, update podAdmissionUpdate) (bool, erro
 	return changed, nil
 }
 
-// podsToUngate lists the slice's Pods once and returns the Pods to ungate plus the per-PodSet count
-// of already-ungated non-terminal Pods (which consume quota). The caller feeds that count to
-// releaseReclaimedQuota, so a reconcile lists the Pods only once.
+// podsToUngate returns the Pods to ungate, and the count of the Pods of each
+// PodSet that are already ungated and not terminated, which consume quota.
 func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload) ([]*corev1.Pod, map[kueue.PodSetReference]int32, error) {
-	log := ctrl.LoggerFrom(ctx)
-	pods, err := workloadslicing.ListPodsForWorkloadSlice(ctx, r.client, wl.Namespace, workloadslicing.SliceName(wl))
+	// All pods in the slice chain share the same WorkloadSliceNameAnnotation,
+	// so the index lookup returns every pod created on behalf of this job.
+	// Although those pods may still carry an older slice's name in their
+	// WorkloadAnnotation (the template is stamped at the slice's admission),
+	// wl is the chain's active slice (resolved in Reconcile), so its granted
+	// PodSet counts are the right cap for ungating any of them.
+	sliceName := workloadslicing.SliceName(wl)
+	pods, err := workloadslicing.ListPodsForWorkloadSlice(ctx, r.client, wl.Namespace, sliceName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listing pods for workload slice: %w", err)
 	}
 
+	granted := workload.ExtractGrantedPodSetCounts(wl)
 	gatedPerPodSet := make(map[kueue.PodSetReference][]*corev1.Pod)
 	ungatedPerPodSet := make(map[kueue.PodSetReference]int32)
 	admissionUpdates := make(map[kueue.PodSetReference]podAdmissionUpdate)
@@ -307,7 +313,7 @@ func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload
 				admissionUpdates[ps] = update
 			}
 			if !podAdmissionCompatible(p, update) {
-				log.Info("leaving elastic pod gated because immutable admission metadata is stale; recycle the pod after its template refreshes",
+				ctrl.LoggerFrom(ctx).Info("leaving elastic pod gated because immutable admission metadata is stale; recycle the pod after its template refreshes",
 					"pod", klog.KObj(p), "podSet", ps)
 				continue
 			}
@@ -318,16 +324,14 @@ func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload
 		}
 	}
 
-	granted := workload.ExtractGrantedPodSetCounts(wl)
+	log := ctrl.LoggerFrom(ctx)
 	var gated []*corev1.Pod
 	for ps, candidates := range gatedPerPodSet {
-		// While a partial-preemption request is in flight, cap ungating at the target so Pods
-		// recreated above it stay gated.
+		// While a partial preemption is in progress, the Pods recreated above the
+		// retained count stay gated.
 		ungateCap := granted[ps]
-		if features.Enabled(features.PartialPreemption) {
-			if target, ok := workload.PreemptionRetainedCount(wl, ps); ok && target < ungateCap {
-				ungateCap = target
-			}
+		if retained, found := workload.PreemptionRetainedCount(wl, ps); found && features.Enabled(features.PartialPreemption) {
+			ungateCap = min(ungateCap, retained)
 		}
 		room := ungateCap - ungatedPerPodSet[ps]
 		var toUngate []*corev1.Pod
@@ -374,11 +378,7 @@ func (r *elasticJobUngater) releaseReclaimedQuota(ctx context.Context, wl *kueue
 			if newCount >= admitCount {
 				continue
 			}
-			// Scale resourceUsage in proportion to the count so count and usage stay consistent.
-			req := resources.NewRequestsFromResourceList(psa.ResourceUsage)
-			req.Divide(int64(admitCount))
-			req.Mul(int64(newCount))
-			psa.ResourceUsage = req.ToResourceList(resources.NewResourceFormatter())
+			psa.ResourceUsage = workload.ScaledResourceUsage(psa.ResourceUsage, admitCount, newCount).ToResourceList(resources.NewResourceFormatter())
 			psa.Count = new(newCount)
 			updated = true
 		}

@@ -52,6 +52,6 @@ func (p PreemptedWorkloads) MergeWithTargets(targets []*Target) PreemptedWorkloa
 	return merged
 }
 
-func (p PreemptedWorkloads) Workloads() []*Target {
+func (p PreemptedWorkloads) Targets() []*Target {
 	return slices.Collect(maps.Values(p))
 }

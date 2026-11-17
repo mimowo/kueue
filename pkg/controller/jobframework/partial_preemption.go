@@ -29,20 +29,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
-	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/util/parallelize"
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
-// reconcilePartialPreemption evicts the Pods above the retained count of an admitted elastic job
-// whose Workload carries a pending partial-preemption request, so each PodSet drains to its
-// retained count. The integration chooses which Pods leave (see JobWithPartialPreemption);
-// without the hook nothing is evicted.
+// reconcilePartialPreemption evicts the Pods that a pending partial preemption
+// of the admitted wl takes from the job, so that each PodSet drains to its
+// retained count. The integration chooses the Pods (see JobWithPartialPreemption);
+// without it nothing is evicted.
 // Eviction goes through the Eviction API so PodDisruptionBudgets are honored.
 func (r *JobReconciler) reconcilePartialPreemption(ctx context.Context, job GenericJob, wl *kueue.Workload) error {
-	if wl == nil || wl.Status.Admission == nil ||
-		!features.Enabled(features.PartialPreemption) ||
-		!workload.HasPendingPreemptionRetainedCount(wl) {
+	ppJob, implemented := job.(JobWithPartialPreemption)
+	if !implemented || !workload.HasPendingPartialPreemption(wl) {
 		return nil
 	}
 	targets := make(map[kueue.PodSetReference]int32)
@@ -52,26 +50,14 @@ func (r *JobReconciler) reconcilePartialPreemption(ctx context.Context, job Gene
 			targets[psa.Name] = *psa.PartialPreemption.RetainedCount
 		}
 	}
-	if len(targets) == 0 {
-		return nil
-	}
-	pods, err := r.reclaimCandidates(ctx, job, wl, targets)
-	if err != nil || len(pods) == 0 {
+	pods, err := ppJob.PodsToReclaim(ctx, r.client, wl, targets)
+	if err != nil {
 		return err
 	}
+	log := ctrl.LoggerFrom(ctx)
 	return parallelize.Until(ctx, len(pods), func(i int) error {
-		return evictPodForReclaim(ctx, r.client, ctrl.LoggerFrom(ctx), pods[i])
+		return evictPodForReclaim(ctx, r.client, log, pods[i])
 	})
-}
-
-// reclaimCandidates returns the Pods the integration chooses to evict. Only integrations that
-// implement JobWithPartialPreemption reclaim Pods; others return none.
-func (r *JobReconciler) reclaimCandidates(ctx context.Context, job GenericJob, wl *kueue.Workload, targets map[kueue.PodSetReference]int32) ([]*corev1.Pod, error) {
-	ppJob, ok := job.(JobWithPartialPreemption)
-	if !ok {
-		return nil, nil
-	}
-	return ppJob.PodsToReclaim(ctx, r.client, wl, targets)
 }
 
 // evictPodForReclaim evicts one Pod through the Eviction API.

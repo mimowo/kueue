@@ -40,9 +40,8 @@ type PartialPreemptionTarget struct {
 
 // Target represents a workload selected for preemption.
 type Target struct {
-	// WorkloadInfo is the original victim before this strategy's simulated preemptions.
-	// Keep it unchanged across partial and full passes so Revert restores all quota;
-	// the snapshot may instead contain PartialPreemption.ReducedInfo or no victim.
+	// WorkloadInfo is the victim as it is before the preemption, also for a
+	// partial target.
 	WorkloadInfo *workload.Info
 	Reason       string
 	WorkloadCq   *scheduler.ClusterQueueSnapshot
@@ -54,6 +53,20 @@ type Target struct {
 	// PartialPreemption is set when the victim is asked to scale down a PodSet
 	// rather than be evicted entirely. Nil for a whole-eviction target.
 	PartialPreemption *PartialPreemptionTarget
+}
+
+// PreemptedUsage returns the usage that the target gives up. An evicted target
+// gives up all of its usage. A partially preempted one gives up the quota of
+// the Pods that it does not retain, and no TAS usage: partial preemption does
+// not shrink a PodSet with a topology request.
+func (t *Target) PreemptedUsage() workload.Usage {
+	if t.PartialPreemption == nil {
+		return t.WorkloadInfo.Usage()
+	}
+	before, after := t.WorkloadInfo.Usage(), t.PartialPreemption.ReducedInfo.Usage()
+	return workload.Usage{Quota: workload.ResourceUsage{
+		Assigned: before.Quota.Assigned.Sub(after.Quota.Assigned),
+	}}
 }
 
 type ConfigurablePreemptionReasonData struct {
@@ -78,31 +91,11 @@ func (d *ConfigurablePreemptionReasonData) EvictionMessage(preemptor *kueue.Work
 
 type yieldCandidate = func(*Target) bool
 
-// Apply simulates preempting the target in the snapshot.
-func (t *Target) Apply(snapshot *scheduler.Snapshot) {
-	// A previous partial pass may already have reduced the victim. Remove its
-	// current usage, not the original usage retained for restoration.
-	cq := snapshot.ClusterQueue(t.WorkloadInfo.ClusterQueue)
-	if current := cq.Workloads[workload.Key(t.WorkloadInfo.Obj)]; current != nil {
-		snapshot.RemoveWorkload(current)
-	}
-	if t.PartialPreemption != nil {
-		snapshot.AddWorkload(t.PartialPreemption.ReducedInfo)
-	}
-}
-
-// Revert restores the victim to its state before preemption.
-func (t *Target) Revert(snapshot *scheduler.Snapshot) {
-	if t.PartialPreemption != nil {
-		snapshot.RemoveWorkload(t.PartialPreemption.ReducedInfo)
-	}
-	snapshot.AddWorkload(t.WorkloadInfo)
-}
-
-// YieldFromSnapshot applies each target to the snapshot before yielding it.
+// YieldFromSnapshot wraps a candidate (Target) yielder with
+// logic removing the candidate from the provided snapshot.
 func YieldFromSnapshot(snapshot *scheduler.Snapshot, yield yieldCandidate) yieldCandidate {
 	return func(t *Target) bool {
-		t.Apply(snapshot)
+		snapshot.RemoveWorkload(t.WorkloadInfo)
 		return yield(t)
 	}
 }

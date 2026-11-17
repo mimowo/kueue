@@ -292,7 +292,7 @@ func TestFindTopologyAssignmentsReplacesSliceUsage(t *testing.T) {
 				if info == nil {
 					t.Fatalf("Workload %s missing before removal", ref)
 				}
-				restore := snapshot.SimulateWorkloadRemoval([]schdcache.WorkloadReplacement{{Full: info}})
+				restore := snapshot.SimulateWorkloadRemoval([]*workload.Info{info})
 				defer restore()
 			}
 			for _, ref := range tc.releasedWorkloads {

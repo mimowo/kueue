@@ -928,7 +928,7 @@ const (
 	// issue: https://github.com/kubernetes-sigs/kueue/issues/975
 	//
 	// PartialPreemption enables preempting only a subset of an elastic workload's PodSet
-	// (scaling it down towards its minCount) instead of evicting the whole workload, when the
+	// (scaling it down towards its minRetainedCount) instead of evicting the whole workload, when the
 	// workload tolerates downscaling.
 	PartialPreemption featuregate.Feature = "PartialPreemption"
 

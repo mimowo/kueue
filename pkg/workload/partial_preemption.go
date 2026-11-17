@@ -19,12 +19,14 @@ package workload
 import (
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/utils/ptr"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/resources"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
 )
 
@@ -63,9 +65,11 @@ func PartialPreemptionPodSet(wl *kueue.Workload, requests []PodSetResources) (ku
 	return shrinkablePodSet, shrinkablePodSet != ""
 }
 
-// HasPendingPreemptionRetainedCount reports whether any admitted PodSet still has an in-flight
-// partial-preemption request above its current effective count.
-func HasPendingPreemptionRetainedCount(wl *kueue.Workload) bool {
+// HasPendingPartialPreemption reports whether a partial preemption of the
+// workload is pending: a PodSet still has more Pods than its retainedCount. The
+// PodSet has the smaller of its count in the spec, after reclaim, and its
+// admitted count.
+func HasPendingPartialPreemption(wl *kueue.Workload) bool {
 	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil {
 		return false
 	}
@@ -108,15 +112,28 @@ func PreemptionMinRetainedCount(wl *kueue.Workload, podSetName kueue.PodSetRefer
 	return 0, false
 }
 
+// ScaledResourceUsage returns the resourceUsage of a PodSet assignment whose
+// count goes from count to newCount: the usage of one Pod times newCount. The
+// elastic Job ungater releases quota with it, and the Workload webhook
+// validates the release with it.
+func ScaledResourceUsage(usage corev1.ResourceList, count, newCount int32) resources.Requests {
+	return resources.NewRequestsFromResourceList(usage).ScaledDown(int64(count)).ScaledUp(int64(newCount))
+}
+
+// CanCompletePartialPreemption tells whether a partial preemption of the
+// workload is in progress and every PodSet is down to its retained count.
+func CanCompletePartialPreemption(wl *kueue.Workload) bool {
+	return IsPartialPreemptionJob(wl) && wl.Status.Admission != nil &&
+		meta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) &&
+		!HasPendingPartialPreemption(wl)
+}
+
 // ReleaseSatisfiedPreemptionTargets updates the partial-preemption condition after
 // every partial-preemption request has been satisfied. The retainedCount field is
 // intentionally left in place: it records Kueue's decision and has no further
 // effect once count <= retainedCount.
 func ReleaseSatisfiedPreemptionTargets(wl *kueue.Workload, now time.Time) bool {
-	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil || !meta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) {
-		return false
-	}
-	if HasPendingPreemptionRetainedCount(wl) {
+	if !CanCompletePartialPreemption(wl) {
 		return false
 	}
 	SetPartiallyPreemptedCondition(wl, now, false,

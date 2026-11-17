@@ -18,16 +18,19 @@ package preemption
 
 import (
 	"context"
-	"slices"
-	"strings"
+	"iter"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 
+	config "sigs.k8s.io/kueue/apis/config/v1beta2"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
+	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler/flavorassigner"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
@@ -38,730 +41,452 @@ import (
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
 )
 
-// victimPodSet is the shrinkable PodSet used by partialPreemptionVictim.
-const victimPodSet kueue.PodSetReference = "executor"
-
-// byName orders victims by name, standing in for the preemption-appeal ordering in
-// tests that only exercise the merge and backfill mechanics.
-func byName(a, b *workload.Info) int {
-	return strings.Compare(a.Obj.Name, b.Obj.Name)
+// shrinkable builds a victim of the "standalone" ClusterQueue with count Pods
+// that partial preemption may shrink to floor.
+func shrinkable(name string, count, floor int32) *kueue.Workload {
+	return partialPreemptionVictim(name, 0, count, floor, nil)
 }
 
-// newPlanPreemptionCtx builds a preemptionCtx for a single-CQ setup the way
-// getPartialPreemptionTargets does, but without running the strategies. The incoming
-// workload requests incomingCPU of CPU in the fixture's CQ.
-func newPlanPreemptionCtx(t *testing.T, quota string, victims []*kueue.Workload, incomingCPU string) (context.Context, *preemptionCtx) {
+// shrinking builds a shrinkable victim that an earlier partial preemption
+// already asked to shrink to target.
+func shrinking(name string, count, floor, target int32) *kueue.Workload {
+	return partialPreemptionVictim(name, 0, count, floor, &target)
+}
+
+// fixed builds a victim of the "standalone" ClusterQueue with count Pods that
+// did not opt in to partial preemption. Its floor would let it shrink to no
+// Pods, so only the missing opt-in keeps it whole.
+func fixed(name string, count int32) *kueue.Workload {
+	wl := shrinkable(name, count, 0)
+	delete(wl.Annotations, constants.PartialPreemptionAnnotation)
+	return wl
+}
+
+// beingEvicted marks the victim as already being evicted.
+func beingEvicted(wl *kueue.Workload) *kueue.Workload {
+	workloadevict.SetEvictedCondition(wl, time.Now(), kueue.WorkloadEvictedByPreemption, "already evicted")
+	return wl
+}
+
+// planTarget is an expected preemption target: an eviction when retained is nil,
+// a shrink to retained Pods otherwise.
+type planTarget struct {
+	name     string
+	retained *int32
+}
+
+func evict(name string) planTarget {
+	return planTarget{name: name}
+}
+
+func shrink(name string, retained int32) planTarget {
+	return planTarget{name: name, retained: &retained}
+}
+
+var planTargetCmpOpts = cmp.Options{
+	cmp.AllowUnexported(planTarget{}),
+	cmpopts.EquateEmpty(),
+}
+
+// planFixture is a Preemptor with a snapshot of the given ClusterQueues and
+// admitted workloads, for an incoming workload that needs preemption in the
+// first of the ClusterQueues.
+type planFixture struct {
+	ctx       context.Context
+	preemptor *Preemptor
+	pCtx      *preemptionCtx
+	// pristine is a second snapshot of the same state that no search touches.
+	pristine *schdcache.Snapshot
+}
+
+func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.ClusterQueue, admitted []*kueue.Workload, incoming *kueue.Workload) planFixture {
 	t.Helper()
 	ctx, log := utiltesting.ContextWithLog(t)
-	items := make([]kueue.Workload, len(victims))
-	for i := range victims {
-		items[i] = *victims[i]
+	items := make([]kueue.Workload, len(admitted))
+	for i := range admitted {
+		items[i] = *admitted[i]
 	}
 	cl := utiltesting.NewClientBuilder().
 		WithLists(&kueue.WorkloadList{Items: items}).
 		Build()
 	cqCache := schdcache.New(cl)
 	cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
-	cq := partialPreemptionClusterQueue(quota)
-	if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
-		t.Fatalf("Couldn't add ClusterQueue to cache: %v", err)
+	for _, cq := range cqs {
+		if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
+			t.Fatalf("Couldn't add ClusterQueue %q to cache: %v", cq.Name, err)
+		}
 	}
-	preemptor := New(cl, workload.Ordering{}, &utiltesting.EventRecorder{}, nil, false,
+	preemptor := New(cl, workload.Ordering{}, &utiltesting.EventRecorder{}, fairSharing, false,
 		clocktesting.NewFakeClock(time.Now()), nil, preemptexpectations.New(), nil)
 	snapshot, err := cqCache.Snapshot(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error while building snapshot: %v", err)
 	}
-	wlInfo := workload.NewInfo(log, utiltestingapi.MakeWorkload("in", "").
-		Request(corev1.ResourceCPU, incomingCPU).Obj())
-	wlInfo.ClusterQueue = kueue.ClusterQueueReference(cq.Name)
+	pristine, err := cqCache.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error while building snapshot: %v", err)
+	}
+	wlInfo := workload.NewInfo(log, incoming)
+	wlInfo.ClusterQueue = kueue.ClusterQueueReference(cqs[0].Name)
 	pCtx := preemptor.buildContext(ctx, *wlInfo, singlePodSetAssignment(flavorassigner.ResourceAssignment{
 		corev1.ResourceCPU: &flavorassigner.FlavorAssignment{Name: "default", Mode: flavorassigner.Preempt},
 	}), snapshot)
-	return ctx, pCtx
+	return planFixture{ctx: ctx, preemptor: preemptor, pCtx: pCtx, pristine: pristine}
 }
 
-// snapshotExecutorCount returns the victim's executor count in the snapshot, or false
-// when the victim is absent from it.
-func snapshotExecutorCount(pCtx *preemptionCtx, wl *kueue.Workload) (int32, bool) {
-	info := pCtx.preemptorCQ.Workloads[workload.Key(wl)]
-	if info == nil {
-		return 0, false
-	}
-	return podSetRequestCount(info, victimPodSet), true
-}
-
-func TestPlanPreemption(t *testing.T) {
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
-	_, log := utiltesting.ContextWithLog(t)
-
-	nonElastic := utiltestingapi.MakeWorkload("c", "").
-		PodSets(*utiltestingapi.MakePodSet(victimPodSet, 5).
-			Request(corev1.ResourceCPU, "1").SetPreemptionMinimumCount(1).Obj()).
-		Obj()
-	evicted := partialPreemptionVictim("evicted", 0, 5, 1, nil)
-	workloadevict.SetEvictedCondition(evicted, time.Now(), kueue.WorkloadEvictedByPreemption, "test")
-
-	cases := map[string]struct {
-		candidate *kueue.Workload
-		// currentAtFloor shrinks the candidate's live snapshot instance to its floor,
-		// as an earlier walk pass would.
-		currentAtFloor bool
-		wantTarget     bool
-	}{
-		"non-elastic candidate is not shrinkable": {
-			candidate: nonElastic,
-		},
-		"evicted candidate is not shrinkable": {
-			candidate: evicted,
-		},
-		"candidate at its floor is not shrinkable": {
-			candidate: partialPreemptionVictim("at-floor", 0, 5, 5, nil),
-		},
-		"live instance already at the floor is not shrunk again": {
-			candidate:      partialPreemptionVictim("shrunk", 0, 5, 1, nil),
-			currentAtFloor: true,
-		},
-		"shrinks the candidate to its floor": {
-			candidate:  partialPreemptionVictim("shrinkable", 0, 5, 1, nil),
-			wantTarget: true,
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			candidate := workload.NewInfo(log, tc.candidate)
-			current := candidate
-			if tc.currentAtFloor {
-				floor, _ := workload.PreemptionMinRetainedCount(tc.candidate, victimPodSet)
-				current = reducedInfoForPartialPreemption(candidate, victimPodSet, floor)
-			}
-
-			target := planPreemption(&Target{WorkloadInfo: candidate, Reason: "test"}, current)
-			if !tc.wantTarget {
-				if target != nil {
-					t.Fatalf("planPreemption() = %+v, want nil", target)
-				}
-				return
-			}
-			if target == nil {
-				t.Fatal("planPreemption() = nil, want a partial target")
-			}
-			if target.WorkloadInfo != candidate {
-				t.Errorf("target.WorkloadInfo is not the original candidate")
-			}
-			if target.Reason != "test" {
-				t.Errorf("target.Reason = %q, want %q", target.Reason, "test")
-			}
-			if target.PartialPreemption == nil {
-				t.Fatal("target.PartialPreemption = nil, want a shrink to the floor")
-			}
-			wantFloor, _ := workload.PreemptionMinRetainedCount(tc.candidate, victimPodSet)
-			if got := target.PartialPreemption.PodSet; got != victimPodSet {
-				t.Errorf("PartialPreemption.PodSet = %q, want %q", got, victimPodSet)
-			}
-			if got := target.PartialPreemption.RetainedCount; got != wantFloor {
-				t.Errorf("PartialPreemption.RetainedCount = %d, want %d", got, wantFloor)
-			}
-			if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != wantFloor {
-				t.Errorf("ReducedInfo executor count = %d, want %d", got, wantFloor)
-			}
-		})
-	}
-}
-
-func TestFillbackPartialPreemption(t *testing.T) {
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
-	const victimName = "victim"
-
-	cases := map[string]struct {
-		quota       string
-		incomingCPU string
-		victim      *kueue.Workload
-		// wholeEvicted marks how walk left the victim: escalated to a whole eviction
-		// (absent from the snapshot) or only shrunk to its floor (present at the floor).
-		wholeEvicted bool
-		wantDropped  bool
-		// wantRetained is the resulting target's retained count; nil means the target
-		// became a whole eviction (ignored when wantDropped).
-		wantRetained *int32
-		// wantSnapshot is the victim's executor count left in the snapshot; nil means
-		// the victim is absent from it.
-		wantSnapshot *int32
-	}{
-		"fully restores and drops the target when the preemptor fits": {
-			quota: "6", incomingCPU: "1",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantDropped:  true,
-			wantSnapshot: new(int32(5)),
-		},
-		"grows back to the largest count that fits": {
-			quota: "6", incomingCPU: "4",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: new(int32(2)),
-			wantSnapshot: new(int32(2)),
-		},
-		"never grows above the in-flight retained count": {
-			quota: "6", incomingCPU: "4",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, new(int32(1))),
-			wantRetained: new(int32(1)),
-			wantSnapshot: new(int32(1)),
-		},
-		"settles at the floor when only the floor fits": {
-			quota: "6", incomingCPU: "5",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: new(int32(1)),
-			wantSnapshot: new(int32(1)),
-		},
-		"whole-evicted victim stays evicted when even the floor does not fit": {
-			quota: "6", incomingCPU: "6",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wholeEvicted: true,
-			wantRetained: nil,
-			wantSnapshot: nil,
-		},
-		"shrunk victim settles at the floor when even the floor does not fit": {
-			quota: "6", incomingCPU: "6",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: new(int32(1)),
-			wantSnapshot: new(int32(1)),
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			ctx, pCtx := newPlanPreemptionCtx(t, tc.quota, []*kueue.Workload{tc.victim}, tc.incomingCPU)
-			info := pCtx.preemptorCQ.Workloads[workload.Key(tc.victim)]
-			if info == nil {
-				t.Fatal("victim missing from the snapshot")
-			}
-			target := &Target{WorkloadInfo: info, WorkloadCq: pCtx.preemptorCQ}
-
-			// Pin the state walk left behind before the search mutates the snapshot, and
-			// stage the target the way walk does: a shrink to the floor when the victim
-			// was only shrunk, a bare target when it was escalated to a whole eviction.
-			floor, _ := workload.PreemptionMinRetainedCount(tc.victim, victimPodSet)
-			pCtx.snapshot.RemoveWorkload(info)
-			if !tc.wholeEvicted {
-				pCtx.snapshot.AddWorkload(reducedInfoForPartialPreemption(info, victimPodSet, floor))
-				target.PartialPreemption = &policy.PartialPreemptionTarget{
-					PodSet:        victimPodSet,
-					RetainedCount: floor,
-					ReducedInfo:   reducedInfoForPartialPreemption(info, victimPodSet, floor),
-				}
-			}
-
-			dropped := fillbackPartialPreemption(ctx, pCtx, target, victimPodSet, false)
-			if dropped != tc.wantDropped {
-				t.Errorf("fillbackPartialPreemption() dropped = %t, want %t", dropped, tc.wantDropped)
-			}
-
-			gotCount, present := snapshotExecutorCount(pCtx, tc.victim)
-			switch {
-			case tc.wantSnapshot == nil:
-				if present {
-					t.Errorf("victim present in the snapshot with count %d, want absent", gotCount)
-				}
-			case !present:
-				t.Errorf("victim absent from the snapshot, want count %d", *tc.wantSnapshot)
-			case gotCount != *tc.wantSnapshot:
-				t.Errorf("victim snapshot count = %d, want %d", gotCount, *tc.wantSnapshot)
-			}
-
-			if tc.wantDropped {
-				return
-			}
-			if tc.wantRetained == nil {
-				if target.PartialPreemption != nil {
-					t.Errorf("target.PartialPreemption = %+v, want a whole eviction (nil)", target.PartialPreemption)
-				}
-				return
-			}
-			if target.PartialPreemption == nil {
-				t.Fatal("target.PartialPreemption = nil, want a shrink")
-			}
-			if got := target.PartialPreemption.RetainedCount; got != *tc.wantRetained {
-				t.Errorf("PartialPreemption.RetainedCount = %d, want %d", got, *tc.wantRetained)
-			}
-			if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != *tc.wantRetained {
-				t.Errorf("ReducedInfo executor count = %d, want %d", got, *tc.wantRetained)
-			}
-		})
-	}
-}
-
-func TestMergeStagedTargets(t *testing.T) {
-	_, log := utiltesting.ContextWithLog(t)
-	mk := func(name string) *Target {
-		return &Target{WorkloadInfo: workload.NewInfo(log, utiltestingapi.MakeWorkload(name, "").Obj())}
-	}
-	partial := mk("v")
-	partial.PartialPreemption = &policy.PartialPreemptionTarget{PodSet: victimPodSet, RetainedCount: 1}
-	whole := mk("v")
-	w := mk("w")
-
-	pl := &partialPlan{ordering: byName}
-	cases := map[string]struct {
-		targets []*Target
-		want    []*Target
-	}{
-		"keeps the partial stage when it is yielded first": {
-			targets: []*Target{partial, whole, w},
-			want:    []*Target{partial, w},
-		},
-		"keeps the first stage regardless of the yield order": {
-			targets: []*Target{w, whole, partial},
-			want:    []*Target{whole, w},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			got := pl.mergeStagedTargets(tc.targets)
-			if len(got) != len(tc.want) {
-				t.Fatalf("mergeStagedTargets() returned %d targets, want %d", len(got), len(tc.want))
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Errorf("merged[%d] = %q, want the %q stage",
-						i, got[i].WorkloadInfo.Obj.Name, tc.want[i].WorkloadInfo.Obj.Name)
-				}
-			}
-		})
-	}
-}
-
-func TestPartialPlanFillBack(t *testing.T) {
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
-
-	v := partialPreemptionVictim("v", 0, 5, 1, nil)
-	n := partialPreemptionVictim("n", 0, 5, 5, nil)
-
-	cases := map[string]struct {
-		quota        string
-		incomingCPU  string
-		victims      []*kueue.Workload
-		makeTargets  func(origByName map[string]*workload.Info, cq *schdcache.ClusterQueueSnapshot) []*Target
-		wantRetained map[string]*int32
-		wantSnapshot map[string]*int32
-	}{
-		"merges a victim's stages and backfills it over the partial range": {
-			quota: "9", incomingCPU: "5",
-			victims: []*kueue.Workload{v, n},
-			makeTargets: func(origByName map[string]*workload.Info, cq *schdcache.ClusterQueueSnapshot) []*Target {
-				vInfo := origByName["v"]
-				floor, _ := workload.PreemptionMinRetainedCount(v, victimPodSet)
-				return []*Target{
-					{
-						WorkloadInfo: vInfo, Reason: "shrink", WorkloadCq: cq,
-						PartialPreemption: &policy.PartialPreemptionTarget{
-							PodSet: victimPodSet, RetainedCount: floor,
-							ReducedInfo: reducedInfoForPartialPreemption(vInfo, victimPodSet, floor),
-						},
-					},
-					{WorkloadInfo: vInfo, Reason: "whole", WorkloadCq: cq},
-					{WorkloadInfo: origByName["n"], Reason: "whole", WorkloadCq: cq},
-				}
-			},
-			wantRetained: map[string]*int32{"v": new(int32(4)), "n": nil},
-			wantSnapshot: map[string]*int32{"v": new(int32(4)), "n": nil},
-		},
-		"drops every target when the preemptor no longer needs the quota": {
-			quota: "20", incomingCPU: "5",
-			victims: []*kueue.Workload{v, n},
-			makeTargets: func(origByName map[string]*workload.Info, cq *schdcache.ClusterQueueSnapshot) []*Target {
-				vInfo := origByName["v"]
-				floor, _ := workload.PreemptionMinRetainedCount(v, victimPodSet)
-				return []*Target{
-					{
-						WorkloadInfo: vInfo, Reason: "shrink", WorkloadCq: cq,
-						PartialPreemption: &policy.PartialPreemptionTarget{
-							PodSet: victimPodSet, RetainedCount: floor,
-							ReducedInfo: reducedInfoForPartialPreemption(vInfo, victimPodSet, floor),
-						},
-					},
-					{WorkloadInfo: vInfo, Reason: "whole", WorkloadCq: cq},
-					{WorkloadInfo: origByName["n"], Reason: "whole", WorkloadCq: cq},
-				}
-			},
-			wantRetained: map[string]*int32{},
-			wantSnapshot: map[string]*int32{"v": new(int32(5)), "n": new(int32(5))},
-		},
-		"routes a whole-eviction stage of a shrinkable victim through the partial search": {
-			quota: "9", incomingCPU: "5",
-			victims: []*kueue.Workload{v},
-			makeTargets: func(origByName map[string]*workload.Info, cq *schdcache.ClusterQueueSnapshot) []*Target {
-				return []*Target{
-					{WorkloadInfo: origByName["v"], Reason: "whole", WorkloadCq: cq},
-				}
-			},
-			wantRetained: map[string]*int32{"v": new(int32(4))},
-			wantSnapshot: map[string]*int32{"v": new(int32(4))},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			ctx, pCtx := newPlanPreemptionCtx(t, tc.quota, tc.victims, tc.incomingCPU)
-			cq := pCtx.preemptorCQ
-
-			origByName := make(map[string]*workload.Info, len(tc.victims))
-			for _, wl := range tc.victims {
-				info := cq.Workloads[workload.Key(wl)]
-				if info == nil {
-					t.Fatalf("workload %q missing from the snapshot", wl.Name)
-				}
-				origByName[wl.Name] = info
-			}
-			// Walk ended with a whole eviction of every victim.
-			for _, info := range origByName {
-				pCtx.snapshot.RemoveWorkload(info)
-			}
-
-			targets := tc.makeTargets(origByName, cq)
-
-			pl := &partialPlan{pCtx: pCtx, ordering: byName}
-			got := pl.fillBack(ctx, targets)
-
-			if len(got) != len(tc.wantRetained) {
-				t.Fatalf("fillBack() returned %d targets, want %d: %+v", len(got), len(tc.wantRetained), got)
-			}
-			gotByName := make(map[string]*Target, len(got))
-			for _, target := range got {
-				gotByName[target.WorkloadInfo.Obj.Name] = target
-			}
-			for name, wantRetained := range tc.wantRetained {
-				target, ok := gotByName[name]
-				if !ok {
-					t.Errorf("victim %q missing from the fillBack result", name)
-					continue
-				}
-				if wantRetained == nil {
-					if target.PartialPreemption != nil {
-						t.Errorf("victim %q: PartialPreemption = %+v, want a whole eviction (nil)", name, target.PartialPreemption)
-					}
-					continue
-				}
-				if target.PartialPreemption == nil {
-					t.Errorf("victim %q: PartialPreemption = nil, want a shrink to %d", name, *wantRetained)
-					continue
-				}
-				if got := target.PartialPreemption.RetainedCount; got != *wantRetained {
-					t.Errorf("victim %q: RetainedCount = %d, want %d", name, got, *wantRetained)
-				}
-			}
-			for name, wantCount := range tc.wantSnapshot {
-				gotCount, present := snapshotExecutorCount(pCtx, origByName[name].Obj)
-				if wantCount == nil {
-					if present {
-						t.Errorf("victim %q present in the snapshot with count %d, want absent", name, gotCount)
-					}
-					continue
-				}
-				if !present {
-					t.Errorf("victim %q absent from the snapshot, want count %d", name, *wantCount)
-				} else if gotCount != *wantCount {
-					t.Errorf("victim %q snapshot count = %d, want %d", name, gotCount, *wantCount)
-				}
-			}
-		})
-	}
-}
-
-// scriptedIterator replays a fixed candidate sequence; walk resets it between passes.
-type scriptedIterator struct {
-	candidates []*workload.Info
-	reason     string
-	idx        int
-}
-
-var _ candidateIterator = (*scriptedIterator)(nil)
-
-func (s *scriptedIterator) Reset() { s.idx = 0 }
-
-func (s *scriptedIterator) Close() {}
-
-func (s *scriptedIterator) Next(borrow bool) *Target {
-	if s.idx >= len(s.candidates) {
-		return nil
-	}
-	wl := s.candidates[s.idx]
-	s.idx++
-	return &Target{WorkloadInfo: wl, Reason: s.reason}
-}
-
-// wantStage is a walk outcome: a partial target retaining the given count, or a whole
-// eviction when retained is nil.
-type wantStage struct {
-	name     string
-	retained *int32
-}
-
-// assertStages checks the yielded targets against the expected stage sequence.
-func assertStages(t *testing.T, got []*Target, want []wantStage) {
+// targets returns the targets that the search finds with the strategies. It
+// checks that a partial target carries the victim as it is after the shrink,
+// and that the search leaves the snapshot as it found it.
+func (f planFixture) targets(t *testing.T, strategies iter.Seq[PreemptionStrategy]) []planTarget {
 	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("walk yielded %d targets, want %d", len(got), len(want))
-	}
-	for i := range want {
-		target := got[i]
-		if gotName := target.WorkloadInfo.Obj.Name; gotName != want[i].name {
-			t.Fatalf("target[%d] = %q, want %q", i, gotName, want[i].name)
+	targets := f.preemptor.getTargets(f.ctx, strategies)
+	got := make([]planTarget, len(targets))
+	for i, target := range targets {
+		got[i].name = target.WorkloadInfo.Obj.Name
+		if pp := target.PartialPreemption; pp != nil {
+			got[i].retained = &pp.RetainedCount
+			if count := podSetRequestCount(pp.ReducedInfo, pp.PodSet); count != pp.RetainedCount {
+				t.Errorf("target %q: ReducedInfo keeps %d Pods, want %d", got[i].name, count, pp.RetainedCount)
+			}
 		}
-		if want[i].retained == nil {
+	}
+	if diff := cmp.Diff(f.pristine, f.pCtx.snapshot, snapCmpOpts); diff != "" {
+		t.Errorf("The search changed the snapshot (-before,+after):\n%s", diff)
+	}
+	return got
+}
+
+// scriptedCandidates offers the given workloads in order, the way the strategies
+// do: a candidate is removed from the snapshot before it is yielded, and the
+// snapshot decides whether a later candidate is offered. A candidate in
+// onlyWith is skipped unless the workload it names is in the snapshot, shrunk
+// or not. It counts the candidates it yields.
+func scriptedCandidates(pCtx *preemptionCtx, candidates []*kueue.Workload, reasons, onlyWith map[string]string, yielded *int) iter.Seq[*Target] {
+	infos := make([]*workload.Info, len(candidates))
+	keys := make(map[string]workload.Reference, len(candidates))
+	for i, wl := range candidates {
+		keys[wl.Name] = workload.Key(wl)
+		infos[i] = pCtx.preemptorCQ.Workloads[keys[wl.Name]]
+	}
+	return func(yield func(*Target) bool) {
+		yield = policy.YieldFromSnapshot(pCtx.snapshot, yield)
+		for _, info := range infos {
+			if other, found := onlyWith[info.Obj.Name]; found && pCtx.preemptorCQ.Workloads[keys[other]] == nil {
+				continue
+			}
+			reason, found := reasons[info.Obj.Name]
+			if !found {
+				reason = kueue.InClusterQueueReason
+			}
+			*yielded++
+			if !yield(&Target{WorkloadInfo: info, Reason: reason, WorkloadCq: pCtx.preemptorCQ}) {
+				return
+			}
+		}
+	}
+}
+
+// TestPartialPlan checks the search with a strategy that offers its candidates
+// in the order given by the test case.
+func TestPartialPlan(t *testing.T) {
+	reject := func([]*Target) (bool, string) {
+		return false, "rejected by the test"
+	}
+	rejectShrinks := func(targets []*Target) (bool, string) {
+		for _, target := range targets {
 			if target.PartialPreemption != nil {
-				t.Errorf("target[%d] (%q): PartialPreemption = %+v, want a whole eviction (nil)",
-					i, want[i].name, target.PartialPreemption)
+				return false, "a shrink rejected by the test"
 			}
-			continue
 		}
-		if target.PartialPreemption == nil {
-			t.Errorf("target[%d] (%q): PartialPreemption = nil, want a shrink to %d",
-				i, want[i].name, *want[i].retained)
-			continue
-		}
-		if got := target.PartialPreemption.PodSet; got != victimPodSet {
-			t.Errorf("target[%d] (%q): PodSet = %q, want %q", i, want[i].name, got, victimPodSet)
-		}
-		if got := target.PartialPreemption.RetainedCount; got != *want[i].retained {
-			t.Errorf("target[%d] (%q): RetainedCount = %d, want %d", i, want[i].name, got, *want[i].retained)
-		}
-		if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != *want[i].retained {
-			t.Errorf("target[%d] (%q): ReducedInfo executor count = %d, want %d",
-				i, want[i].name, got, *want[i].retained)
-		}
-	}
-}
-
-func TestPartialPlanWalk(t *testing.T) {
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
-
-	evicted := func(name string) *kueue.Workload {
-		wl := partialPreemptionVictim(name, 0, 5, 1, nil)
-		workloadevict.SetEvictedCondition(wl, time.Now(), kueue.WorkloadEvictedByPreemption, "test")
-		return wl
-	}
-	e := evicted("e")
-	e1 := evicted("e1")
-	e2 := evicted("e2")
-	// p is an in-flight partial-preemption victim (reclaim target 2, floor 1).
-	p := partialPreemptionVictim("p", 0, 5, 1, new(int32(2)))
-	s := partialPreemptionVictim("s", 0, 5, 1, nil)
-	n := partialPreemptionVictim("n", 0, 5, 5, nil)
-
-	cases := map[string]struct {
-		// victims in candidate order.
-		victims []*kueue.Workload
-		// stopAfter makes the yield stop the walk once this many targets were seen.
-		stopAfter int
-		want      []wantStage
-		wantCont  bool
-	}{
-		"walks the evicted, pending, partial and full phases in order": {
-			victims: []*kueue.Workload{e, p, s, n},
-			want: []wantStage{
-				{name: "e"},
-				{name: "p", retained: new(int32(1))},
-				{name: "s", retained: new(int32(1))},
-				{name: "p"},
-				{name: "s"},
-				{name: "n"},
-			},
-			wantCont: true,
-		},
-		"reports an interrupted walk": {
-			victims:   []*kueue.Workload{e, p, s, n},
-			stopAfter: 2,
-			want: []wantStage{
-				{name: "e"},
-				{name: "p", retained: new(int32(1))},
-			},
-		},
-		"whole-evicts the whole evicted prefix": {
-			victims: []*kueue.Workload{e1, e2, s},
-			want: []wantStage{
-				{name: "e1"},
-				{name: "e2"},
-				{name: "s", retained: new(int32(1))},
-				{name: "s"},
-			},
-			wantCont: true,
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, pCtx := newPlanPreemptionCtx(t, "100", tc.victims, "1")
-			candidates := make([]*workload.Info, 0, len(tc.victims))
-			for _, victim := range tc.victims {
-				info := pCtx.preemptorCQ.Workloads[workload.Key(victim)]
-				if info == nil {
-					t.Fatalf("victim %q missing from the snapshot", victim.Name)
-				}
-				candidates = append(candidates, info)
-			}
-			pl := &partialPlan{
-				pCtx:     pCtx,
-				iterator: &scriptedIterator{candidates: candidates, reason: "test"},
-				ordering: byName,
-			}
-			var targets []*Target
-			cont := true
-			for target := range pl.walk() {
-				targets = append(targets, target)
-				if tc.stopAfter != 0 && len(targets) >= tc.stopAfter {
-					cont = false
-					break
-				}
-			}
-			if cont != tc.wantCont {
-				t.Errorf("walk() cont = %t, want %t", cont, tc.wantCont)
-			}
-			assertStages(t, targets, tc.want)
-		})
-	}
-}
-
-func TestFullPlanWalk(t *testing.T) {
-	victims := []*kueue.Workload{
-		partialPreemptionVictim("a", 0, 2, 2, nil),
-		partialPreemptionVictim("b", 0, 2, 2, nil),
-		partialPreemptionVictim("c", 0, 2, 2, nil),
+		return true, ""
 	}
 	cases := map[string]struct {
-		stopAfter int
-		want      []wantStage
-		wantCont  bool
-	}{
-		"whole-evicts every candidate in candidate order": {
-			want:     []wantStage{{name: "a"}, {name: "b"}, {name: "c"}},
-			wantCont: true,
-		},
-		"reports an interrupted walk": {
-			stopAfter: 1,
-			want:      []wantStage{{name: "a"}},
-		},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			_, pCtx := newPlanPreemptionCtx(t, "100", victims, "1")
-			candidates := make([]*workload.Info, 0, len(victims))
-			for _, victim := range victims {
-				info := pCtx.preemptorCQ.Workloads[workload.Key(victim)]
-				if info == nil {
-					t.Fatalf("victim %q missing from the snapshot", victim.Name)
-				}
-				candidates = append(candidates, info)
-			}
-			pl := &fullPlan{
-				pCtx:     pCtx,
-				iterator: &scriptedIterator{candidates: candidates, reason: "test"},
-			}
-			var targets []*Target
-			cont := true
-			for target := range pl.walk() {
-				targets = append(targets, target)
-				if tc.stopAfter != 0 && len(targets) >= tc.stopAfter {
-					cont = false
-					break
-				}
-			}
-			if cont != tc.wantCont {
-				t.Errorf("walk() cont = %t, want %t", cont, tc.wantCont)
-			}
-			assertStages(t, targets, tc.want)
-		})
-	}
-}
-
-func TestFullPlanFillBack(t *testing.T) {
-	cases := map[string]struct {
-		quota       string
+		partialPreemption bool
+		quota             string
+		// candidates are admitted and offered to the search in this order.
+		candidates []*kueue.Workload
+		// others are admitted but never offered.
+		others []*kueue.Workload
+		// reasons overrides the preemption reason of a candidate.
+		reasons map[string]string
+		// onlyWith makes the strategy offer a candidate only while the workload
+		// it names is in the snapshot.
+		onlyWith    map[string]string
 		incomingCPU string
-		// numTargets is how many of a, b, c fillBack receives; the last one is the
-		// decisive removal and is never restored.
-		numTargets int
-		// wantNames are the surviving targets in candidate order.
-		wantNames []string
-		// wantPresent are the victims restored to the snapshot.
-		wantPresent []string
+		verify      func([]*Target) (bool, string)
+
+		wantTargets []planTarget
+		// wantYielded is the number of candidates the search asks for, in the
+		// shrinking walk and in the eviction walk together.
+		wantYielded int
 	}{
-		"a lone decisive victim is never restored": {
-			quota: "6", incomingCPU: "3", numTargets: 1,
-			wantNames:   []string{"a"},
-			wantPresent: nil,
+		"gate off: the walk stops at the first fit and unneeded victims are added back": {
+			quota:       "7",
+			candidates:  []*kueue.Workload{fixed("a", 2), fixed("b", 4), fixed("c", 1)},
+			incomingCPU: "4",
+			wantTargets: []planTarget{evict("b")},
+			wantYielded: 2,
 		},
-		"keeps every victim when none fits back": {
-			quota: "4", incomingCPU: "3", numTargets: 3,
-			wantNames:   []string{"a", "b", "c"},
-			wantPresent: nil,
+		"gate off: a victim that opted in is evicted": {
+			quota:       "6",
+			candidates:  []*kueue.Workload{shrinkable("v", 5, 1)},
+			incomingCPU: "4",
+			wantTargets: []planTarget{evict("v")},
+			wantYielded: 1,
 		},
-		"restores the victims the preemptor no longer needs": {
-			quota: "6", incomingCPU: "3", numTargets: 3,
-			wantNames:   []string{"a", "c"},
-			wantPresent: []string{"b"},
+		"gate off: an in-flight shrink is ignored": {
+			quota:       "6",
+			candidates:  []*kueue.Workload{shrinking("v", 5, 1, 3)},
+			incomingCPU: "3",
+			wantTargets: []planTarget{evict("v")},
+			wantYielded: 1,
 		},
-		"restores every earlier victim when the quota allows": {
-			quota: "8", incomingCPU: "3", numTargets: 3,
-			wantNames:   []string{"c"},
-			wantPresent: []string{"a", "b"},
+		"nobody opted in: same targets as with the gate off, after a shrinking walk over every candidate": {
+			partialPreemption: true,
+			quota:             "7",
+			candidates:        []*kueue.Workload{fixed("a", 2), fixed("b", 4), fixed("c", 1)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{evict("b")},
+			wantYielded:       5,
+		},
+		"a victim shrinks only as far as the workload needs": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinkable("v", 5, 1)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{shrink("v", 2)},
+			wantYielded:       1,
+		},
+		"a later candidate shrinks instead of an earlier one being evicted": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{fixed("a", 4), shrinkable("b", 6, 2)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{shrink("b", 2)},
+			wantYielded:       2,
+		},
+		"gate off: a candidate that is only offered while an earlier one is not evicted is not reached": {
+			quota:       "10",
+			candidates:  []*kueue.Workload{fixed("a", 4), shrinkable("b", 6, 2)},
+			onlyWith:    map[string]string{"b": "a"},
+			incomingCPU: "4",
+			wantTargets: []planTarget{evict("a")},
+			wantYielded: 1,
+		},
+		"a candidate that is only offered while an earlier one is not evicted shrinks": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{fixed("a", 4), shrinkable("b", 6, 2)},
+			onlyWith:          map[string]string{"b": "a"},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{shrink("b", 2)},
+			wantYielded:       2,
+		},
+		"a victim that is not offered once an earlier one is evicted is not evicted": {
+			partialPreemption: true,
+			quota:             "12",
+			candidates:        []*kueue.Workload{shrinkable("a", 4, 3), fixed("b", 4), fixed("c", 4)},
+			onlyWith:          map[string]string{"b": "a"},
+			incomingCPU:       "8",
+			wantTargets:       []planTarget{evict("a"), evict("c")},
+			wantYielded:       5,
+		},
+		"gate off: a victim that the workload does not need is added back": {
+			quota:       "16",
+			candidates:  []*kueue.Workload{shrinkable("a", 6, 3), shrinkable("b", 8, 6)},
+			incomingCPU: "9",
+			wantTargets: []planTarget{evict("b")},
+			wantYielded: 2,
+		},
+		"a victim that is added back without partial preemption is not evicted": {
+			partialPreemption: true,
+			quota:             "16",
+			candidates:        []*kueue.Workload{shrinkable("a", 6, 3), shrinkable("b", 8, 6)},
+			incomingCPU:       "9",
+			wantTargets:       []planTarget{evict("b")},
+			wantYielded:       4,
+		},
+		"an eviction is given back before a shrink": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{fixed("a", 1), fixed("b", 5), shrinkable("c", 3, 1)},
+			incomingCPU:       "7",
+			wantTargets:       []planTarget{evict("b"), shrink("c", 2)},
+			wantYielded:       5,
+		},
+		"an eviction is given back before a shrink that is already in progress": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{fixed("a", 1), fixed("b", 6), shrinking("c", 3, 1, 2)},
+			incomingCPU:       "7",
+			wantTargets:       []planTarget{evict("b"), shrink("c", 2)},
+			wantYielded:       5,
+		},
+		"evictions come on top of the shrinks, and an evicted victim that can shrink gets its floor back": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{shrinkable("a", 5, 1), fixed("b", 5)},
+			incomingCPU:       "8",
+			wantTargets:       []planTarget{shrink("a", 2), evict("b")},
+			wantYielded:       4,
+		},
+		// Shrinking l1 and h1 to their floors is not enough. Evicting l1, the first
+		// target of the search without partial preemption, is: l2 is left alone.
+		"victims are evicted one by one, in the order of the walk": {
+			partialPreemption: true,
+			quota:             "11",
+			candidates:        []*kueue.Workload{shrinkable("l1", 4, 2), fixed("l2", 3), shrinkable("h1", 4, 2)},
+			incomingCPU:       "5",
+			wantTargets:       []planTarget{evict("l1"), shrink("h1", 3)},
+			wantYielded:       5,
+		},
+		// Without partial preemption a, b and c are removed, and a is added back.
+		// With s shrunk, evicting b, the first of the two in the walk, is enough.
+		"victims are evicted in the order of the walk, also when an earlier one is added back": {
+			partialPreemption: true,
+			quota:             "20",
+			candidates:        []*kueue.Workload{fixed("a", 1), fixed("b", 5), fixed("c", 5), shrinkable("s", 9, 5)},
+			incomingCPU:       "8",
+			wantTargets:       []planTarget{evict("b"), shrink("s", 6)},
+			wantYielded:       7,
+		},
+		"a shrunk victim that is not needed after an eviction is left alone": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{shrinkable("a", 4, 3), fixed("b", 6)},
+			incomingCPU:       "6",
+			wantTargets:       []planTarget{evict("b")},
+			wantYielded:       4,
+		},
+		"a shrink that is already in progress counts as done": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinking("v", 5, 1, 3)},
+			incomingCPU:       "3",
+			wantTargets:       []planTarget{shrink("v", 3)},
+			wantYielded:       1,
+		},
+		"every in-flight shrink is used before any victim shrinks further": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{shrinking("a", 5, 1, 3), shrinking("b", 5, 1, 3)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{shrink("a", 3), shrink("b", 3)},
+			wantYielded:       2,
+		},
+		"an in-flight victim shrinks further when its in-flight target is not enough": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinking("v", 5, 1, 3)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{shrink("v", 2)},
+			wantYielded:       1,
+		},
+		"an in-flight victim never gets more than its in-flight target": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinking("v", 5, 1, 3)},
+			incomingCPU:       "2",
+			wantTargets:       []planTarget{shrink("v", 3)},
+			wantYielded:       1,
+		},
+		"an in-flight shrink that the workload does not need is left out": {
+			partialPreemption: true,
+			quota:             "8",
+			candidates:        []*kueue.Workload{shrinking("a", 3, 1, 2), shrinking("b", 5, 1, 2)},
+			incomingCPU:       "3",
+			wantTargets:       []planTarget{shrink("b", 2)},
+			wantYielded:       2,
+		},
+		"an eviction that is already in progress counts as done": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{beingEvicted(fixed("e", 4)), shrinkable("a", 6, 2)},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{evict("e")},
+			wantYielded:       2,
+		},
+		"a victim that is being evicted does not shrink": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{beingEvicted(shrinkable("v", 5, 1))},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{evict("v")},
+			wantYielded:       2,
+		},
+		"a victim selected by a PreemptionConfig rule is evicted": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinkable("v", 5, 1)},
+			reasons:           map[string]string{"v": kueue.ConfigurablePreemptionReason},
+			incomingCPU:       "4",
+			wantTargets:       []planTarget{evict("v")},
+			wantYielded:       2,
+		},
+		"no targets when the workload does not fit even without any candidate": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{shrinkable("train", 3, 2)},
+			others:            []*kueue.Workload{fixed("serve", 6)},
+			incomingCPU:       "6",
+			wantYielded:       2,
+		},
+		"the eviction result is used when the result with a shrink is rejected": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinkable("v", 5, 1)},
+			incomingCPU:       "4",
+			verify:            rejectShrinks,
+			wantTargets:       []planTarget{evict("v")},
+			wantYielded:       2,
+		},
+		"the eviction result is used when the result with a shrink and an eviction is rejected": {
+			partialPreemption: true,
+			quota:             "10",
+			candidates:        []*kueue.Workload{shrinkable("a", 5, 1), fixed("b", 5)},
+			incomingCPU:       "8",
+			verify:            rejectShrinks,
+			wantTargets:       []planTarget{evict("a"), evict("b")},
+			wantYielded:       4,
+		},
+		"no targets when the eviction result is rejected too": {
+			partialPreemption: true,
+			quota:             "6",
+			candidates:        []*kueue.Workload{shrinkable("v", 5, 1)},
+			incomingCPU:       "4",
+			verify:            reject,
+			wantYielded:       2,
+		},
+		"gate off: no targets when the eviction result is rejected": {
+			quota:       "6",
+			candidates:  []*kueue.Workload{fixed("v", 5)},
+			incomingCPU: "4",
+			verify:      reject,
+			wantYielded: 1,
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			victims := []*kueue.Workload{
-				partialPreemptionVictim("a", 0, 2, 2, nil),
-				partialPreemptionVictim("b", 0, 2, 2, nil),
-				partialPreemptionVictim("c", 0, 2, 2, nil),
-			}
-			victims = victims[:tc.numTargets]
-			ctx, pCtx := newPlanPreemptionCtx(t, tc.quota, victims, tc.incomingCPU)
+			features.SetFeatureGateDuringTest(t, features.PartialPreemption, tc.partialPreemption)
+			fixture := newPlanFixture(t, nil, []*kueue.ClusterQueue{partialPreemptionClusterQueue(tc.quota)},
+				append(tc.candidates, tc.others...),
+				utiltestingapi.MakeWorkload("in", "").Request(corev1.ResourceCPU, tc.incomingCPU).Obj())
+			yielded := 0
+			strategy := newPreemptionStrategy(
+				scriptedCandidates(fixture.pCtx, tc.candidates, tc.reasons, tc.onlyWith, &yielded),
+				false,
+				fixture.pCtx,
+				withVerify(tc.verify),
+			)
 
-			var targets []*Target
-			for _, victim := range victims {
-				info := pCtx.preemptorCQ.Workloads[workload.Key(victim)]
-				if info == nil {
-					t.Fatalf("victim %q missing from the snapshot", victim.Name)
-				}
-				// Walk ended with a whole eviction of every victim.
-				pCtx.snapshot.RemoveWorkload(info)
-				targets = append(targets, wholeTarget(&Target{WorkloadInfo: info, Reason: "test"}, pCtx.preemptorCQ))
-			}
+			got := fixture.targets(t, func(yield func(PreemptionStrategy) bool) { yield(strategy) })
 
-			pl := &fullPlan{pCtx: pCtx}
-			got := pl.fillBack(ctx, targets)
-
-			gotNames := make([]string, len(got))
-			for i := range got {
-				gotNames[i] = got[i].WorkloadInfo.Obj.Name
+			if diff := cmp.Diff(tc.wantTargets, got, planTargetCmpOpts); diff != "" {
+				t.Errorf("Unexpected targets (-want,+got):\n%s", diff)
 			}
-			if !slices.Equal(gotNames, tc.wantNames) {
-				t.Errorf("fillBack() returned %v, want %v", gotNames, tc.wantNames)
-			}
-			wantPresent := make(map[string]bool, len(tc.wantPresent))
-			for _, victimName := range tc.wantPresent {
-				wantPresent[victimName] = true
-			}
-			for _, victim := range victims {
-				_, present := snapshotExecutorCount(pCtx, victim)
-				if wantPresent[victim.Name] && !present {
-					t.Errorf("victim %q absent from the snapshot, want present", victim.Name)
-				} else if !wantPresent[victim.Name] && present {
-					t.Errorf("victim %q present in the snapshot, want absent", victim.Name)
-				}
+			if yielded != tc.wantYielded {
+				t.Errorf("The search asked for %d candidates, want %d", yielded, tc.wantYielded)
 			}
 		})
-	}
-}
-
-func TestNewPlan(t *testing.T) {
-	_, pCtx := newPlanPreemptionCtx(t, "6", nil, "1")
-	iter := &scriptedIterator{}
-
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
-	pl := newPlan(pCtx, iter, false, byName)
-	if _, ok := pl.(*partialPlan); !ok {
-		t.Errorf("newPlan() with PartialPreemption on = %T, want *partialPlan", pl)
-	}
-
-	features.SetFeatureGateDuringTest(t, features.PartialPreemption, false)
-	pl = newPlan(pCtx, iter, false, byName)
-	if _, ok := pl.(*fullPlan); !ok {
-		t.Errorf("newPlan() with PartialPreemption off = %T, want *fullPlan", pl)
 	}
 }

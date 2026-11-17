@@ -550,14 +550,11 @@ func validateAdmissionUpdate(newObj, oldObj *kueue.Workload, path *field.Path) f
 			op.PartialPreemption = np.PartialPreemption
 			// On release, count and resourceUsage may decrease only for a pending
 			// request, only down to the retained count, and in proportion to each
-			// other: the expected usage is the per-Pod usage times the new count, the
-			// same scaling releaseReclaimedQuota applies. An unchanged count may not
-			// rewrite resourceUsage; anything else is rejected as immutable below.
+			// other. An unchanged count may not rewrite resourceUsage; anything else
+			// is rejected as immutable below.
 			newCount := ptr.Deref(np.Count, 0)
 			if hasPendingPartialPreemption && newCount < oldCount && newCount >= oldRetained {
-				expectedUsage := resources.NewRequestsFromResourceList(op.ResourceUsage)
-				expectedUsage.Divide(int64(oldCount))
-				expectedUsage.Mul(int64(newCount))
+				expectedUsage := workload.ScaledResourceUsage(op.ResourceUsage, oldCount, newCount)
 				if resources.Equal(resources.NewRequestsFromResourceList(np.ResourceUsage), expectedUsage) {
 					op.Count = np.Count
 					op.ResourceUsage = np.ResourceUsage

@@ -25,12 +25,12 @@ import (
 	"sigs.k8s.io/kueue/pkg/features"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption/classical"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption/policy"
+	"sigs.k8s.io/kueue/pkg/workload"
 )
 
 type candidateIterator interface {
 	Reset()
-	Next(borrow bool) *Target
-	Close()
+	Next(borrow bool) (candidate *workload.Info, evictReason string)
 }
 
 // classicalPreemptionStrategy implements a heuristic to find a minimal set of Workloads
@@ -96,85 +96,17 @@ func classicalPreemptionStrategy(ctx context.Context, preemptor *Preemptor, pree
 					)
 				}
 			}
-			classicalIter := &classicalCandidateIterator{
-				preemptionCtx:  preemptionCtx,
-				classical:      candidatesGenerator,
-				allowBorrowing: allowBorrowing,
-			}
-			pl := newPlan(preemptionCtx, classicalIter, allowBorrowing, preemptor.candidatesOrdering(log, preemptionCtx.preemptorCQ.Name))
-			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx, pl)) {
+			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx)) {
 				return
 			}
 		}
 	}
 }
 
-// classicalCandidateIterator feeds plan.walk candidates without applying them to the
-// snapshot: Next returns the classical candidate as-is (PartialPreemption stays nil,
-// the workload is still fully in the snapshot). plan.walk's own YieldFromSnapshot wrap
-// is what actually mutates the snapshot, and only after walk has decided whether to
-// shrink the candidate or whole-evict it. Applying here instead would make that
-// decision impossible: partialPlan.walk reads each candidate's live snapshot state to
-// make it.
-//
-// ConfigurablePreemptions candidates are the opposite: FindCandidates applies each one
-// internally before Next returns it (its own trigger-escalation logic needs the
-// snapshot updated between candidates). plan.walk's wrap re-applying an
-// already-removed workload is a no-op (Target.Apply skips it), not a bug.
-type classicalCandidateIterator struct {
-	preemptionCtx  *preemptionCtx
-	classical      classical.CandidateIterator
-	allowBorrowing bool
-
-	configurableNext func() (*Target, bool)
-	configurableStop func()
-}
-
-func (c *classicalCandidateIterator) Reset() {
-	c.classical.Reset()
-}
-
-func (c *classicalCandidateIterator) Next(borrow bool) *Target {
-	if candidateWl, reason := c.classical.Next(borrow); candidateWl != nil {
-		return &Target{
-			WorkloadInfo: candidateWl,
-			Reason:       reason,
-			WorkloadCq:   c.preemptionCtx.snapshot.ClusterQueue(candidateWl.ClusterQueue),
-		}
-	}
-	if !features.Enabled(features.ConfigurablePreemptions) {
-		return nil
-	}
-	// TODO: So far, we have only traversed the candidate set of ConfigurablePreemptions once.
-	// Therefore, enabling PartialPreemption and ConfigurablePreemptions simultaneously is not
-	// supported for the time being.
-	if c.configurableNext == nil {
-		c.configurableNext, c.configurableStop = iter.Pull(func(yield func(*Target) bool) {
-			c.preemptionCtx.configurableEvaluator.FindCandidates(
-				c.preemptionCtx.snapshot,
-				c.preemptionCtx.frsNeedPreemption,
-				func() bool { return workloadQuotaFits(c.preemptionCtx, c.allowBorrowing) },
-				yield,
-			)
-		})
-	}
-	t, ok := c.configurableNext()
-	if !ok {
-		return nil
-	}
-	return t
-}
-
-func (c *classicalCandidateIterator) Close() {
-	if c.configurableStop != nil {
-		c.configurableStop()
-	}
-}
-
 func iterateOverCandidates(
 	ctx context.Context,
 	preemptionCtx *preemptionCtx,
-	iterator classical.CandidateIterator,
+	iterator candidateIterator,
 	allowBorrowing bool,
 	yield func(*Target) bool,
 ) (cont bool) {

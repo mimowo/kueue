@@ -1140,7 +1140,7 @@ func SetPreemptedCondition(w *kueue.Workload, now time.Time, reason string, mess
 
 // SetPartiallyPreemptedCondition sets the PartiallyPreempted condition, reporting whether it
 // changed. True marks an in-flight partial-preemption target whose quota is still charged;
-// False marks the quota release (reason QuotaReleased) or the timeout (reason Timeout).
+// False marks the quota release (reason QuotaReleased).
 func SetPartiallyPreemptedCondition(w *kueue.Workload, now time.Time, active bool, reason, message string) bool {
 	status := metav1.ConditionFalse
 	if active {

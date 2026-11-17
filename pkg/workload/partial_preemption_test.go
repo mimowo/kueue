@@ -105,7 +105,7 @@ func TestPreemptionRetainedCount(t *testing.T) {
 	}
 }
 
-func TestHasPendingPreemptionRetainedCount(t *testing.T) {
+func TestHasPendingPartialPreemption(t *testing.T) {
 	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
 
 	// The active release path lowers spec.Count (synced from job parallelism) and/or reports
@@ -185,8 +185,8 @@ func TestHasPendingPreemptionRetainedCount(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			features.SetFeatureGateDuringTest(t, features.ReclaimablePods, tc.reclaimablePodsGate)
-			if got := HasPendingPreemptionRetainedCount(makeWorkload(tc.admitted, tc.specCount, tc.reclaimable, tc.target)); got != tc.want {
-				t.Fatalf("HasPendingPreemptionRetainedCount() = %t, want %t", got, tc.want)
+			if got := HasPendingPartialPreemption(makeWorkload(tc.admitted, tc.specCount, tc.reclaimable, tc.target)); got != tc.want {
+				t.Fatalf("HasPendingPartialPreemption() = %t, want %t", got, tc.want)
 			}
 		})
 	}

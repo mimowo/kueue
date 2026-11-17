@@ -197,29 +197,16 @@ func (s *Snapshot) SimulateWorkloadUsageRemoval(workloads []*workload.Info) func
 	}
 }
 
-// WorkloadReplacement describes a workload removal. Reduced is the workload
-// retained after partial preemption; nil means full eviction.
-type WorkloadReplacement struct {
-	Full    *workload.Info
-	Reduced *workload.Info
-}
-
-// SimulateWorkloadRemoval temporarily removes each full workload from the
-// snapshot. For partial preemption, it replaces the full workload with Reduced.
-// It returns a function that restores the original workloads and usage.
-func (s *Snapshot) SimulateWorkloadRemoval(replacements []WorkloadReplacement) func() {
-	for _, replacement := range replacements {
-		s.RemoveWorkload(replacement.Full)
-		if replacement.Reduced != nil {
-			s.AddWorkload(replacement.Reduced)
-		}
+// SimulateWorkloadRemoval modifies the snapshot by removing the list
+// of workloads from workloads' respective ClusterQueues. It returns a
+// function which can be used to restore these workloads.
+func (s *Snapshot) SimulateWorkloadRemoval(workloads []*workload.Info) func() {
+	for _, w := range workloads {
+		s.RemoveWorkload(w)
 	}
 	return func() {
-		for _, replacement := range slices.Backward(replacements) {
-			if replacement.Reduced != nil {
-				s.RemoveWorkload(replacement.Reduced)
-			}
-			s.AddWorkload(replacement.Full)
+		for _, w := range workloads {
+			s.AddWorkload(w)
 		}
 	}
 }
@@ -584,11 +571,7 @@ func (s *Snapshot) SimulatePodRemoval(ctx context.Context, log logr.Logger, work
 // returns the single undo. Freeing their quota is not enough: until the simulator
 // is told, it still reports their Pods and the nodes they occupy.
 func (s *Snapshot) SimulateRemovals(ctx context.Context, log logr.Logger, workloads []*workload.Info) func() {
-	replacements := make([]WorkloadReplacement, 0, len(workloads))
-	for _, w := range workloads {
-		replacements = append(replacements, WorkloadReplacement{Full: w})
-	}
-	revertUsage := s.SimulateWorkloadRemoval(replacements)
+	revertUsage := s.SimulateWorkloadRemoval(workloads)
 	revertPods := s.SimulatePodRemoval(ctx, log, workloads)
 	return func() {
 		revertPods()

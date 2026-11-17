@@ -71,7 +71,7 @@ func (p *PreemptionOracle) SimulatePreemption(
 		return policy.NoCandidates, borrow
 	}
 
-	revertRemoval := p.snapshot.SimulateWorkloadRemoval(WorkloadReplacements(candidates))
+	revertRemoval := SimulateUsageRemoval(p.snapshot, candidates)
 	borrowAfterPreemptions, _ := classical.FindHeightOfLowestSubtreeThatFits(cq, fr, quantity)
 	revertRemoval()
 
