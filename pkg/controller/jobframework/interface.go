@@ -120,7 +120,7 @@ type JobWithReclaimablePods interface {
 }
 
 // JobWithPartialPreemption is an optional interface implemented by elastic integrations that choose
-// which Pods to evict when a partial-preemption reclaim target is set on their Workload. Without it,
+// which Pods to evict when a partial-preemption request is set on their Workload. Without it,
 // Kueue evicts no Pods for the integration.
 type JobWithPartialPreemption interface {
 	// PodsToReclaim returns the running Pods to evict so each PodSet shrinks to its target. wl is the

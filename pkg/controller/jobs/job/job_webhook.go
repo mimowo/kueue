@@ -49,10 +49,11 @@ var (
 	syncCompletionAnnotationsPath = field.NewPath("metadata", "annotations").Key(JobCompletionsEqualParallelismAnnotation)
 	replicaMetaPath               = field.NewPath("spec", "template", "metadata")
 
-	partialPreemptionAnnotationPath = field.NewPath("metadata", "annotations").Key(constants.PartialPreemptionAnnotation)
-	completionModePath              = field.NewPath("spec", "completionMode")
-	restartPolicyPath               = field.NewPath("spec", "template", "spec", "restartPolicy")
-	podFailurePolicyPath            = field.NewPath("spec", "podFailurePolicy")
+	partialPreemptionAnnotationPath                 = field.NewPath("metadata", "annotations").Key(constants.PartialPreemptionAnnotation)
+	partialPreemptionMinRetainedCountAnnotationPath = replicaMetaPath.Child("annotations").Key(constants.PodSetPartialPreemptionMinRetainedCountAnnotation)
+	completionModePath                              = field.NewPath("spec", "completionMode")
+	restartPolicyPath                               = field.NewPath("spec", "template", "spec", "restartPolicy")
+	podFailurePolicyPath                            = field.NewPath("spec", "podFailurePolicy")
 )
 
 // applyWorkloadSliceSchedulingGate ensures that the workload slice-specific
@@ -154,6 +155,7 @@ func (w *JobWebhook) validateCreate(ctx context.Context, job *Job) (field.ErrorL
 	allErrs = append(allErrs, jobframework.ValidateJobOnCreate(job, w.maxTimeoutOnWorkload)...)
 	allErrs = append(allErrs, w.validatePartialAdmissionCreate(job)...)
 	allErrs = append(allErrs, validatePartialPreemptionCreate(job)...)
+	allErrs = append(allErrs, validatePartialPreemptionMinRetainedCount(job)...)
 	allErrs = append(allErrs, w.validateSyncCompletionCreate(job)...)
 	if features.Enabled(features.TopologyAwareScheduling) {
 		validationErrs, err := w.validateTopologyRequest(ctx, job)
@@ -234,6 +236,33 @@ func hasDisruptionTargetIgnoreRule(policy *batchv1.PodFailurePolicy) bool {
 	return false
 }
 
+// validatePartialPreemptionMinRetainedCount validates the kueue.x-k8s.io/podset-partial-preemption-min-retained-count
+// pod-template annotation: a non-negative integer below the Job's pod count. A malformed or
+// negative value is silently dropped by podSetPreemptionMinRetainedCount, and a floor at or above
+// the count leaves nothing for partial preemption to shrink, so the scheduler evicts the whole
+// Workload instead. Both are rejected so an invalid floor is reported instead of being ignored.
+func validatePartialPreemptionMinRetainedCount(job *Job) field.ErrorList {
+	if !features.Enabled(features.PartialPreemption) {
+		return nil
+	}
+	strVal, found := job.Spec.Template.Annotations[constants.PodSetPartialPreemptionMinRetainedCountAnnotation]
+	if !found {
+		return nil
+	}
+	minCount, err := strconv.ParseInt(strVal, 10, 32)
+	if err != nil {
+		return field.ErrorList{field.Invalid(partialPreemptionMinRetainedCountAnnotationPath, strVal, "must be a non-negative integer")}
+	}
+	if minCount < 0 {
+		return field.ErrorList{field.Invalid(partialPreemptionMinRetainedCountAnnotationPath, int(minCount), "must be a non-negative integer")}
+	}
+	if minCount >= int64(job.podsCount()) {
+		return field.ErrorList{field.Invalid(partialPreemptionMinRetainedCountAnnotationPath, int(minCount),
+			fmt.Sprintf("should be less than %d", job.podsCount()))}
+	}
+	return nil
+}
+
 func (w *JobWebhook) validateSyncCompletionCreate(job *Job) field.ErrorList {
 	var allErrs field.ErrorList
 	if strVal, found := job.Annotations[JobCompletionsEqualParallelismAnnotation]; found {
@@ -292,6 +321,12 @@ func (w *JobWebhook) validateUpdate(ctx context.Context, oldJob, newJob *Job) (f
 	}
 	allErrs = append(allErrs, w.validateSyncCompletionCreate(newJob)...)
 	allErrs = append(allErrs, validatePartialPreemptionCreate(newJob)...)
+	if newJob.Spec.Template.Annotations[constants.PodSetPartialPreemptionMinRetainedCountAnnotation] != oldJob.Spec.Template.Annotations[constants.PodSetPartialPreemptionMinRetainedCountAnnotation] ||
+		(ptr.Deref(oldJob.Spec.Suspend, false) && ptr.Deref(newJob.Spec.Suspend, false) && oldJob.podsCount() > newJob.podsCount()) {
+		// Revalidate the scale-down floor when the annotation is created or changed, and when the
+		// Pod count drops while the Job stays suspended, so it cannot end up at or above the count.
+		allErrs = append(allErrs, validatePartialPreemptionMinRetainedCount(newJob)...)
+	}
 	allErrs = append(allErrs, jobframework.ValidateJobOnUpdate(oldJob, newJob, w.queues.DefaultLocalQueueExist, w.maxTimeoutOnWorkload)...)
 	allErrs = append(allErrs, validatePartialAdmissionUpdate(oldJob, newJob)...)
 	if features.Enabled(features.TopologyAwareScheduling) {

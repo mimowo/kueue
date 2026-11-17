@@ -279,14 +279,6 @@ func noCandidates(preemptionCtx *preemptionCtx, candidates []*workload.Info) boo
 // iterateWithFirstFsStrategy returns preemption candidates in an order based on
 // the first configured FairSharing strategy,
 // retryCandidates may be used if rule S2-b is configured.
-//
-// Unlike classicalCandidateIterator, the YieldFromSnapshot wrap below applies each
-// candidate to the snapshot as soon as it is yielded. That isn't optional here:
-// ComputeShares/ComputeTargetShareAfterRemoval for the next candidate need the
-// snapshot to already reflect every candidate accepted so far, or the DRS shares
-// computed for later candidates would be wrong. fullPlan.walk's own YieldFromSnapshot
-// wrap then re-applies an already-removed workload, which Target.Apply treats as a
-// no-op.
 func iterateWithFirstFsStrategy(
 	log logr.Logger,
 	preemptionCtx *preemptionCtx,

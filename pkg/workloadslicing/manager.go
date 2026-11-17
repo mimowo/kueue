@@ -101,7 +101,7 @@ func (r *Manager) EnsureWorkloadSlices(
 				for _, psa := range wl.Status.Admission.PodSetAssignments {
 					if wlPodSetsCounts[psa.Name] > *psa.Count {
 						if workload.HasPendingPreemptionRetainedCount(wl) {
-							klog.FromContext(ctx).V(3).Info("Deferring scale-up probe while partial-preemption reclaim target is pending", "workload", klog.KObj(wl))
+							klog.FromContext(ctx).V(3).Info("Deferring scale-up probe while a partial-preemption request is pending", "workload", klog.KObj(wl))
 							return wl, true, nil
 						}
 						// The workload was partially admitted, create the full scale up probe

@@ -781,10 +781,9 @@ func (r *WorkloadReconciler) reconcileActive(ctx context.Context, wl *kueue.Work
 	return false, ctrl.Result{}, nil
 }
 
-// reconcileScaleDown clears a partial-preemption request once the PodSet's effective count -
+// reconcileScaleDown completes a partial-preemption request once the PodSet's effective count -
 // the smaller of its spec-derived count and its admitted count psa.Count - has fallen to the target,
 // and flips the PartiallyPreempted condition to False with reason QuotaReleased.
-// It returns done=true when reconciliation should stop after handling a pending request.
 func (r *WorkloadReconciler) reconcileScaleDown(ctx context.Context, wl *kueue.Workload) (done bool, err error) {
 	if !workload.IsPartialPreemptionJob(wl) || wl.Status.Admission == nil || !apimeta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) {
 		return false, nil

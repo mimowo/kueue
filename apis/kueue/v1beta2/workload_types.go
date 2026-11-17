@@ -472,9 +472,8 @@ type PodSetAssignment struct {
 
 	// partialPreemption describes an in-progress partial preemption of this
 	// PodSet. Only Kueue sets it. Kueue releases the quota of the Pods in
-	// excess of targetCount only after they have terminated: it then lowers
-	// count to targetCount and resourceUsage in proportion, and clears this
-	// field.
+	// excess of retainedCount only after they have terminated: it then lowers
+	// count to retainedCount and resourceUsage in proportion.
 	//
 	// This field is alpha-level. Kueue sets it only when the PartialPreemption
 	// feature gate is enabled.
@@ -662,19 +661,20 @@ type PodSet struct {
 	// +kubebuilder:validation:Minimum=0
 	MinCount *int32 `json:"minCount,omitempty"`
 
-	// partialPreemption configures partial preemption of this PodSet, in which
-	// Kueue shrinks the PodSet instead of evicting the whole Workload.
-	// If unset, Kueue does not shrink this PodSet.
-	//
-	// This is an alpha field and requires enabling the PartialPreemption feature gate.
-	//
-	// +optional
-	PartialPreemption *PodSetPartialPreemption `json:"partialPreemption,omitempty"`
-
 	// topologyRequest defines the topology request for the PodSet.
 	//
 	// +optional
 	TopologyRequest *PodSetTopologyRequest `json:"topologyRequest,omitempty"`
+
+	// partialPreemption configures partial preemption of this PodSet, in which
+	// Kueue shrinks the PodSet instead of evicting the whole Workload.
+	// If unset, Kueue does not shrink this PodSet.
+	//
+	// This field is alpha-level, and is ignored by Kueue when the
+	// PartialPreemption feature gate is disabled.
+	//
+	// +optional
+	PartialPreemption *PodSetPartialPreemption `json:"partialPreemption,omitempty"`
 }
 
 // PodSetPartialPreemption configures partial preemption of a PodSet.
@@ -1146,18 +1146,19 @@ const (
 	WorkloadWaitingForReplacementPods = "WaitingForReplacementPods"
 
 	// WorkloadPartiallyPreempted means that partial preemption has shrunk one of the
-	// Workload's PodSets to a reclaim target. While it is True, Kueue evicts the PodSet's
-	// Pods above the target and keeps the quota charged. Once no Pod above the target is
-	// left, Kueue releases the reclaimed quota and sets this condition to False with
-	// reason QuotaReleased. This is an alpha condition set only with the PartialPreemption
-	// feature gate.
+	// Workload's PodSets to its target (the assignment's retainedCount). While it is
+	// True, Kueue evicts the PodSet's Pods above the target and the quota stays
+	// charged. Once no Pod above the target is left, Kueue releases the quota and
+	// sets this condition to False with reason QuotaReleased. The retainedCount field
+	// stays in place and has no further effect once the count equals it. This is an
+	// alpha condition set only with the PartialPreemption feature gate.
 	WorkloadPartiallyPreempted = "PartiallyPreempted"
 )
 
 // Reasons for the WorkloadPartiallyPreempted condition.
 const (
 	// WorkloadPartiallyPreemptedReasonQuotaReleased indicates that partial preemption
-	// released the shrunk PodSet's reclaimed quota because no Pod above the target remains.
+	// released the shrunk PodSet's quota because no Pod above the target remains.
 	WorkloadPartiallyPreemptedReasonQuotaReleased string = "QuotaReleased"
 )
 

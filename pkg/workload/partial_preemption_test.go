@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/constants"
@@ -77,7 +76,7 @@ func TestPreemptionRetainedCount(t *testing.T) {
 				Obj(),
 		).
 		Obj()
-	wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: ptr.To[int32](7)}
+	wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: new(int32(7))}
 
 	cases := map[string]struct {
 		name      kueue.PodSetReference
@@ -156,13 +155,13 @@ func TestHasPendingPreemptionRetainedCount(t *testing.T) {
 		"target above spec": {
 			admitted:  true,
 			specCount: 5,
-			target:    ptr.To[int32](2),
+			target:    new(int32(2)),
 			want:      true,
 		},
 		"spec lowered to target": {
 			admitted:  true,
 			specCount: 2,
-			target:    ptr.To[int32](2),
+			target:    new(int32(2)),
 			want:      false,
 		},
 		"reclaimable reaches target": {
@@ -170,7 +169,7 @@ func TestHasPendingPreemptionRetainedCount(t *testing.T) {
 			admitted:            true,
 			specCount:           5,
 			reclaimable:         3,
-			target:              ptr.To[int32](2),
+			target:              new(int32(2)),
 			want:                false,
 		},
 		"reclaimable above target": {
@@ -178,7 +177,7 @@ func TestHasPendingPreemptionRetainedCount(t *testing.T) {
 			admitted:            true,
 			specCount:           5,
 			reclaimable:         1,
-			target:              ptr.To[int32](2),
+			target:              new(int32(2)),
 			want:                true,
 		},
 	}

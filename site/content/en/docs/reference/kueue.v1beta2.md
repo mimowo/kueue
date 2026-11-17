@@ -2242,6 +2242,13 @@ enabled.</p>
 <p>This is an alpha field and requires enabling PartialAdmission feature gate.</p>
 </td>
 </tr>
+<tr><td><code>topologyRequest</code><br/>
+<a href="#kueue-x-k8s-io-v1beta2-PodSetTopologyRequest"><code>PodSetTopologyRequest</code></a>
+</td>
+<td>
+   <p>topologyRequest defines the topology request for the PodSet.</p>
+</td>
+</tr>
 <tr><td><code>partialPreemption</code><br/>
 <a href="#kueue-x-k8s-io-v1beta2-PodSetPartialPreemption"><code>PodSetPartialPreemption</code></a>
 </td>
@@ -2249,14 +2256,8 @@ enabled.</p>
    <p>partialPreemption configures partial preemption of this PodSet, in which
 Kueue shrinks the PodSet instead of evicting the whole Workload.
 If unset, Kueue does not shrink this PodSet.</p>
-<p>This is an alpha field and requires enabling the PartialPreemption feature gate.</p>
-</td>
-</tr>
-<tr><td><code>topologyRequest</code><br/>
-<a href="#kueue-x-k8s-io-v1beta2-PodSetTopologyRequest"><code>PodSetTopologyRequest</code></a>
-</td>
-<td>
-   <p>topologyRequest defines the topology request for the PodSet.</p>
+<p>This field is alpha-level, and is ignored by Kueue when the
+PartialPreemption feature gate is disabled.</p>
 </td>
 </tr>
 </tbody>
@@ -2477,9 +2478,8 @@ topologyAssignment.</p>
 <td>
    <p>partialPreemption describes an in-progress partial preemption of this
 PodSet. Only Kueue sets it. Kueue releases the quota of the Pods in
-excess of targetCount only after they have terminated: it then lowers
-count to targetCount and resourceUsage in proportion, and clears this
-field.</p>
+excess of retainedCount only after they have terminated: it then lowers
+count to retainedCount and resourceUsage in proportion.</p>
 <p>This field is alpha-level. Kueue sets it only when the PartialPreemption
 feature gate is enabled.</p>
 </td>
@@ -2488,47 +2488,68 @@ feature gate is enabled.</p>
 </table>
 
 ## `PodSetPartialPreemption`     {#kueue-x-k8s-io-v1beta2-PodSetPartialPreemption}
+    
 
 **Appears in:**
 
 - [PodSet](#kueue-x-k8s-io-v1beta2-PodSet)
 
 
+<p>PodSetPartialPreemption configures partial preemption of a PodSet.</p>
+
 
 <table class="table">
 <thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
 <tbody>
-
-<tr><td><code>minCount</code><br/>
+    
+  
+<tr><td><code>minRetainedCount</code> <B>[Required]</B><br/>
 <code>int32</code>
 </td>
 <td>
-   <p>minCount is the lowest number of Pods that partial preemption may shrink
-the PodSet to. It does not stop Kueue from evicting the whole Workload.</p>
+   <p>minRetainedCount is the minimum number of Pods that the PodSet keeps
+when Kueue partially preempts it. Partial preemption does not shrink
+the PodSet below this number.</p>
+<p>It does not prevent eviction of the whole Workload. It is independent
+of the PodSet's minCount, which controls partial admission.</p>
 </td>
 </tr>
 </tbody>
 </table>
 
 ## `PodSetPartialPreemptionStatus`     {#kueue-x-k8s-io-v1beta2-PodSetPartialPreemptionStatus}
+    
 
 **Appears in:**
 
 - [PodSetAssignment](#kueue-x-k8s-io-v1beta2-PodSetAssignment)
 
 
+<p>PodSetPartialPreemptionStatus describes an in-progress partial preemption of
+a PodSet.</p>
+
 
 <table class="table">
 <thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
 <tbody>
-
-<tr><td><code>targetCount</code><br/>
+    
+  
+<tr><td><code>retainedCount</code> <B>[Required]</B><br/>
 <code>int32</code>
 </td>
 <td>
-   <p>targetCount is the number of Pods that the PodSet is being shrunk to.
-It is lower than the assignment's count and not lower than the PodSet's
-partialPreemption.minCount. Kueue may lower it, but never raises it.</p>
+   <p>retainedCount is the number of Pods that the latest partial preemption
+leaves in the PodSet. It records Kueue's decision, not an observed Pod
+count.</p>
+<p>The shrink is in progress while the assignment's count is higher than
+retainedCount: Kueue evicts the Pods in excess of retainedCount. Once
+none of them is left, including terminating Pods, Kueue lowers count
+to retainedCount and resourceUsage in proportion. From then on this
+field stays set and has no further effect.</p>
+<p>retainedCount is at least the PodSet's
+partialPreemption.minRetainedCount and at most the assignment's count.
+Kueue may lower it for another partial preemption, but never raises it
+within the same admission.</p>
 </td>
 </tr>
 </tbody>

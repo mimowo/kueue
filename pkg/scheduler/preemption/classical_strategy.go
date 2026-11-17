@@ -30,6 +30,7 @@ import (
 type candidateIterator interface {
 	Reset()
 	Next(borrow bool) *Target
+	Close()
 }
 
 // classicalPreemptionStrategy implements a heuristic to find a minimal set of Workloads

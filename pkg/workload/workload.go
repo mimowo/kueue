@@ -919,7 +919,7 @@ func SetConditionAndUpdate(ctx context.Context,
 	}
 	return workloadpatching.PatchStatus(ctx, c, wl, client.FieldOwner(managerPrefix+"-"+condition.Type), func(wl *kueue.Workload) (bool, error) {
 		return apimeta.SetStatusCondition(&wl.Status.Conditions, condition), nil
-	}, workloadpatching.WithLooseOnApply(), workloadpatching.WithRetryOnConflict())
+	})
 }
 
 const PodsNotReadyMessage = "Not all pods are ready or succeeded"

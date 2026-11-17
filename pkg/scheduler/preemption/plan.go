@@ -53,9 +53,7 @@ type fullPlan struct {
 
 func (p *fullPlan) walk() iter.Seq[*Target] {
 	return func(yield func(*Target) bool) {
-		if closer, ok := p.iterator.(interface{ Close() }); ok {
-			defer closer.Close()
-		}
+		defer p.iterator.Close()
 		yield = policy.YieldFromSnapshot(p.pCtx.snapshot, yield)
 		p.iterator.Reset()
 		for {
@@ -122,9 +120,7 @@ type partialPlan struct {
 // once as a pass-3 whole eviction; fillBack merges the two stages.
 func (p *partialPlan) walk() iter.Seq[*Target] {
 	return func(yield func(*Target) bool) {
-		if closer, ok := p.iterator.(interface{ Close() }); ok {
-			defer closer.Close()
-		}
+		defer p.iterator.Close()
 		yield = policy.YieldFromSnapshot(p.pCtx.snapshot, yield)
 		// Pass 1: the already-evicted prefix as whole evictions, then the in-flight
 		// partial victims reused/extended.
@@ -150,7 +146,7 @@ func (p *partialPlan) walk() iter.Seq[*Target] {
 				inEvictedPrefix = false
 			}
 			// Pass 1 only reuses victims that already have an in-flight partial-preemption
-			// reclaim target; other non-evicted candidates are left to pass 2.
+			// request; other non-evicted candidates are left to pass 2.
 			if !workload.HasPendingPreemptionRetainedCount(t.WorkloadInfo.Obj) {
 				continue
 			}
@@ -273,23 +269,23 @@ func (p *partialPlan) mergeStagedTargets(targets []*Target) []*Target {
 //
 //	(a) a full restore — drop the target entirely if the preemptor still fits with the
 //	    victim completely back;
-//	(b) if the full restore didn't apply or didn't fit, a restore to minRetainCount
+//	(b) if the full restore didn't apply or didn't fit, a restore to minRetainedCount
 //	    (the floor): if that fits, there's no need to fall back further. If even
-//	    minRetainCount doesn't fit, the outcome depends on how walk left the victim,
+//	    minRetainedCount doesn't fit, the outcome depends on how walk left the victim,
 //	    captured as wasWholeEvicted before the snapshot is mutated: a victim already
 //	    whole-evicted during walk settles at 0, which walk already proved fits; a
-//	    victim that was only shrunk to minRetainCount (never escalated) keeps that
+//	    victim that was only shrunk to minRetainedCount (never escalated) keeps that
 //	    shrink instead of escalating to a whole eviction here — its PartialPreemption
-//	    already reflects minRetainCount, set by pass 1/2's planPreemption, so there is
+//	    already reflects minRetainedCount, set by pass 1/2's planPreemption, so there is
 //	    nothing left to update;
-//	(c) if minRetainCount fits, a search in (minRetainCount, min(full, high)) for the
+//	(c) if minRetainedCount fits, a search in (minRetainedCount, min(full, high)) for the
 //	    largest count that still fits (high caps the regrowth at an already in-flight
 //	    retained count, if one is pending for this victim).
 //
 // All arithmetic uses the original full WorkloadInfo so Revert/Apply restore the
 // victim's whole quota.
 func fillbackPartialPreemption(ctx context.Context, preemptionCtx *preemptionCtx, t *Target, podSet kueue.PodSetReference, allowBorrowing bool) (dropped bool) {
-	minRetainCount, _ := workload.PreemptionMinRetainedCount(t.WorkloadInfo.Obj, podSet)
+	minRetainedCount, _ := workload.PreemptionMinRetainedCount(t.WorkloadInfo.Obj, podSet)
 	full := podSetRequestCount(t.WorkloadInfo, podSet)
 	high := full
 	if pending, has := workload.PreemptionRetainedCount(t.WorkloadInfo.Obj, podSet); has && pending < high {
@@ -301,25 +297,36 @@ func fillbackPartialPreemption(ctx context.Context, preemptionCtx *preemptionCtx
 	key := workload.Key(t.WorkloadInfo.Obj)
 	wasWholeEvicted := cq.Workloads[key] == nil
 
-	// setTo rewrites the victim's snapshot instance to hold count.
-	setTo := func(count int32) {
+	// setTo rewrites the victim's snapshot instance to hold count and returns the
+	// reduced instance it installed, or nil for a full restore or a whole eviction.
+	setTo := func(count int32) *workload.Info {
 		if current := cq.Workloads[key]; current != nil {
 			snapshot.RemoveWorkload(current)
 		}
 		switch {
 		case count >= full:
 			snapshot.AddWorkload(t.WorkloadInfo)
+			return nil
 		case count > 0:
-			snapshot.AddWorkload(reducedInfoForPartialPreemption(t.WorkloadInfo, podSet, count))
+			reduced := reducedInfoForPartialPreemption(t.WorkloadInfo, podSet, count)
+			snapshot.AddWorkload(reduced)
+			return reduced
 		}
+		return nil
 	}
-	// restorePartial sets the snapshot and records the partial target at count.
+	// restorePartial sets the snapshot and records the partial target at count,
+	// reusing the reduced instance setTo installed.
 	restorePartial := func(count int32) {
-		setTo(count)
+		reduced := setTo(count)
+		if reduced == nil {
+			// count == 0: record a zero-usage instance so Revert/Apply still see a
+			// well-formed partial target.
+			reduced = reducedInfoForPartialPreemption(t.WorkloadInfo, podSet, count)
+		}
 		t.PartialPreemption = &policy.PartialPreemptionTarget{
 			PodSet:        podSet,
 			RetainedCount: count,
-			ReducedInfo:   reducedInfoForPartialPreemption(t.WorkloadInfo, podSet, count),
+			ReducedInfo:   reduced,
 		}
 	}
 
@@ -331,27 +338,27 @@ func fillbackPartialPreemption(ctx context.Context, preemptionCtx *preemptionCtx
 		}
 	}
 
-	// (b) minRetainCount (floor) restore.
-	setTo(minRetainCount)
+	// (b) minRetainedCount (floor) restore.
+	setTo(minRetainedCount)
 	if !workloadFits(ctx, preemptionCtx, allowBorrowing) {
 		if wasWholeEvicted {
 			// walk already proved the preemptor fits with the victim fully gone.
 			setTo(0)
 			t.PartialPreemption = nil
 		}
-		// Otherwise the victim was only ever shrunk to minRetainCount (never
+		// Otherwise the victim was only ever shrunk to minRetainedCount (never
 		// escalated to a whole eviction), and t.PartialPreemption already holds that
 		// shrink from pass 1/2's planPreemption — the snapshot (just set above) and
 		// the target already agree, nothing left to update.
 		return false
 	}
 
-	// (c) minRetainCount fits: search (minRetainCount, min(full, high)) for the
+	// (c) minRetainedCount fits: search (minRetainedCount, min(full, high)) for the
 	// largest count that still fits. A smaller count frees more room, so sort.Search
 	// finds the largest fitting one.
-	best := minRetainCount
-	if band := min(high, full-1); band > minRetainCount {
-		n := int(band - minRetainCount)
+	best := minRetainedCount
+	if band := min(high, full-1); band > minRetainedCount {
+		n := int(band - minRetainedCount)
 		k := sort.Search(n, func(k int) bool {
 			setTo(band - int32(k))
 			return workloadFits(ctx, preemptionCtx, allowBorrowing)

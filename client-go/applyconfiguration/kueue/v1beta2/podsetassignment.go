@@ -165,9 +165,8 @@ type PodSetAssignmentApplyConfiguration struct {
 	DelayedTopologyRequest *kueuev1beta2.DelayedTopologyRequestState `json:"delayedTopologyRequest,omitempty"`
 	// partialPreemption describes an in-progress partial preemption of this
 	// PodSet. Only Kueue sets it. Kueue releases the quota of the Pods in
-	// excess of targetCount only after they have terminated: it then lowers
-	// count to targetCount and resourceUsage in proportion, and clears this
-	// field.
+	// excess of retainedCount only after they have terminated: it then lowers
+	// count to retainedCount and resourceUsage in proportion.
 	//
 	// This field is alpha-level. Kueue sets it only when the PartialPreemption
 	// feature gate is enabled.

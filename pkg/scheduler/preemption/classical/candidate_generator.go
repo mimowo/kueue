@@ -81,10 +81,8 @@ func WorkloadUsesResources(wl *workload.Info, frsNeedPreemption sets.Set[resourc
 	return false
 }
 
-// splitEvicted divides a sorted candidate slice (evicted entries first) into an
-// evicted group, walked once ahead of everything else, and a non-evicted group,
-// by a plain binary split on the WorkloadEvicted condition.
-func splitEvicted(workloads []*candidateElem) (evicted, nonEvicted []*candidateElem) {
+// assume a prefix of the elements has condition WorkloadEvicted = true
+func splitEvicted(workloads []*candidateElem) ([]*candidateElem, []*candidateElem) {
 	firstFalse := sort.Search(len(workloads), func(i int) bool {
 		return !workloadevict.IsEvicted(workloads[i].wl.Obj)
 	})

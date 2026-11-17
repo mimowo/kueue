@@ -426,7 +426,7 @@ func (p *Preemptor) IssuePreemptions(
 		targetKey := types.NamespacedName{Name: target.WorkloadInfo.Obj.Name, Namespace: target.WorkloadInfo.Obj.Namespace}
 		if target.PartialPreemption != nil {
 			pp := target.PartialPreemption
-			if targetCount, ok := workload.PreemptionRetainedCount(target.WorkloadInfo.Obj, pp.PodSet); ok && targetCount <= pp.RetainedCount {
+			if currentRetained, ok := workload.PreemptionRetainedCount(target.WorkloadInfo.Obj, pp.PodSet); ok && currentRetained <= pp.RetainedCount {
 				log.V(3).Info("Partial preemption ongoing", "targetWorkload", klog.KObj(target.WorkloadInfo.Obj), "preemptingWorkload", klog.KObj(preemptor.Obj))
 			} else if err := p.partiallyPreempt(ctx, preemptor, target); err != nil {
 				errCh.SendErrorWithCancel(err, cancel)
@@ -556,28 +556,27 @@ func (p *Preemptor) getTargets(ctx context.Context, strategies iter.Seq[Preempti
 		var targets []*Target
 		for candidate := range strategy.plan.walk() {
 			targets = append(targets, candidate)
-			if !workloadFits(ctx, strategy.pCtx, strategy.allowBorrowing) {
-				continue
-			}
-			targets = strategy.plan.fillBack(ctx, targets)
-			if strategy.verify != nil {
-				if valid, reason := strategy.verify(targets); !valid {
-					if logV := log.V(5); logV.Enabled() {
-						logV.Info("Discarding preemption targets: strategy verification failed",
-							"preemptingWorkload", klog.KObj(strategy.pCtx.preemptor.Obj),
-							"targets", logging.GetObjectReferences(targets),
-							"reason", reason)
+			if workloadFits(ctx, strategy.pCtx, strategy.allowBorrowing) {
+				targets = strategy.plan.fillBack(ctx, targets)
+				if strategy.verify != nil {
+					if valid, reason := strategy.verify(targets); !valid {
+						if logV := log.V(5); logV.Enabled() {
+							logV.Info("Discarding preemption targets: strategy verification failed",
+								"preemptingWorkload", klog.KObj(strategy.pCtx.preemptor.Obj),
+								"targets", logging.GetObjectReferences(targets),
+								"reason", reason)
+						}
+						break
 					}
-					break
 				}
+				if logV := log.V(5); logV.Enabled() {
+					logV.Info("Preemption target search succeeded",
+						"preemptingWorkload", klog.KObj(strategy.pCtx.preemptor.Obj),
+						"targets", logging.GetObjectReferences(targets))
+				}
+				restoreSnapshot(strategy.pCtx.snapshot, targets)
+				return targets
 			}
-			if logV := log.V(5); logV.Enabled() {
-				logV.Info("Preemption target search succeeded",
-					"preemptingWorkload", klog.KObj(strategy.pCtx.preemptor.Obj),
-					"targets", logging.GetObjectReferences(targets))
-			}
-			restoreSnapshot(strategy.pCtx.snapshot, targets)
-			return targets
 		}
 		restoreSnapshot(strategy.pCtx.snapshot, targets)
 	}

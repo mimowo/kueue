@@ -149,10 +149,10 @@ func (r *elasticJobUngater) Reconcile(ctx context.Context, req reconcile.Request
 		return reconcile.Result{}, err
 	}
 
-	// Release the quota reclaimed by partial preemption before ungating: when a reclaim target
-	// is in flight, following the drained Pods down to the target takes priority, and it must run
-	// even on reconciles where nothing is left to ungate. The over-target Pods are evicted by the
-	// job integration, not here.
+	// Release the quota reclaimed by partial preemption before ungating: when a request
+	// is in flight, following the drained Pods down to the retained count takes priority,
+	// and it must run even on reconciles where nothing is left to ungate. The Pods above
+	// the retained count are evicted by the job integration, not here.
 	if features.Enabled(features.PartialPreemption) && workload.HasPendingPreemptionRetainedCount(active) {
 		if err := r.releaseReclaimedQuota(ctx, active, ungatedPerPodSet); err != nil {
 			return reconcile.Result{}, err
@@ -321,8 +321,8 @@ func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload
 	granted := workload.ExtractGrantedPodSetCounts(wl)
 	var gated []*corev1.Pod
 	for ps, candidates := range gatedPerPodSet {
-		// While a reclaim target is in flight, cap ungating at the target so Pods recreated above
-		// it stay gated.
+		// While a partial-preemption request is in flight, cap ungating at the target so Pods
+		// recreated above it stay gated.
 		ungateCap := granted[ps]
 		if features.Enabled(features.PartialPreemption) {
 			if target, ok := workload.PreemptionRetainedCount(wl, ps); ok && target < ungateCap {
@@ -350,8 +350,8 @@ func (r *elasticJobUngater) podsToUngate(ctx context.Context, wl *kueue.Workload
 	return gated, ungatedPerPodSet, nil
 }
 
-// releaseReclaimedQuota lowers each partial-preemption PodSet's admitted count toward its reclaim
-// target as its ungated Pods drain, scaling resourceUsage with it.
+// releaseReclaimedQuota lowers each partial-preemption PodSet's admitted count toward its retained
+// count as its ungated Pods drain, scaling resourceUsage with it.
 func (r *elasticJobUngater) releaseReclaimedQuota(ctx context.Context, wl *kueue.Workload, ungatedPerPodSet map[kueue.PodSetReference]int32) error {
 	if !apimeta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) {
 		return nil
@@ -383,7 +383,7 @@ func (r *elasticJobUngater) releaseReclaimedQuota(ctx context.Context, wl *kueue
 			updated = true
 		}
 		return updated, nil
-	}, patching.WithLooseOnApply()); err != nil {
+	}); err != nil {
 		return fmt.Errorf("releasing partial-preemption quota: %w", err)
 	}
 	log.V(3).Info("partial-preemption quota followed live pods down", "workload", klog.KObj(wl))

@@ -34,9 +34,10 @@ import (
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
-// reconcilePartialPreemption evicts the over-target Pods of an admitted elastic job whose Workload
-// carries a partial-preemption reclaim target, so each PodSet drains to its target. The integration
-// chooses which Pods leave (see JobWithPartialPreemption); without the hook nothing is evicted.
+// reconcilePartialPreemption evicts the Pods above the retained count of an admitted elastic job
+// whose Workload carries a pending partial-preemption request, so each PodSet drains to its
+// retained count. The integration chooses which Pods leave (see JobWithPartialPreemption);
+// without the hook nothing is evicted.
 // Eviction goes through the Eviction API so PodDisruptionBudgets are honored.
 func (r *JobReconciler) reconcilePartialPreemption(ctx context.Context, job GenericJob, wl *kueue.Workload) error {
 	if wl == nil || wl.Status.Admission == nil ||

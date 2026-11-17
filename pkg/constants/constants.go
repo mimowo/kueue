@@ -112,14 +112,14 @@ const (
 	// PartialPreemption feature gate is disabled.
 	PartialPreemptionAnnotation = "kueue.x-k8s.io/partial-preemption"
 
-	// PodSetPartialPreemptionMinRetainedCountAnnotation is an annotation set on a Job's
-	// PodTemplate. Its value is the lowest number of Pods that partial
-	// preemption may shrink the corresponding PodSet to, as a non-negative
-	// integer.
-	//
-	// Kueue copies the value to the PodSet's partialPreemption.minRetainedCount when it
-	// creates a Workload for the Job. A later change to the annotation applies
-	// only to Workloads created after it.
+	// PodSetPartialPreemptionMinRetainedCountAnnotation is the shared annotation key
+	// for a partial-preemption PodSet minimum. An integration reads its non-negative
+	// integer value from the Job's PodTemplate and copies it to the corresponding
+	// Workload PodSet's partialPreemption.minRetainedCount. All framework
+	// integrations use this same annotation name. If the annotation is absent, the
+	// integration does not configure partial preemption for the PodSet. Kueue copies
+	// the value when it creates a Workload or scale-up slice; a later annotation
+	// change applies only to subsequently created Workloads/slices.
 	//
 	// This annotation is alpha-level, and is ignored by Kueue when the
 	// PartialPreemption feature gate is disabled.

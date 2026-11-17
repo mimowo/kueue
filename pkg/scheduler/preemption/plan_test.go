@@ -25,7 +25,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	clocktesting "k8s.io/utils/clock/testing"
-	"k8s.io/utils/ptr"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
@@ -82,16 +81,6 @@ func newPlanPreemptionCtx(t *testing.T, quota string, victims []*kueue.Workload,
 	return ctx, pCtx
 }
 
-// executorCount returns the victim's executor count from its usage.
-func executorCount(info *workload.Info) int32 {
-	for i := range info.TotalRequests {
-		if info.TotalRequests[i].Name == victimPodSet {
-			return info.TotalRequests[i].Count
-		}
-	}
-	return 0
-}
-
 // snapshotExecutorCount returns the victim's executor count in the snapshot, or false
 // when the victim is absent from it.
 func snapshotExecutorCount(pCtx *preemptionCtx, wl *kueue.Workload) (int32, bool) {
@@ -99,7 +88,7 @@ func snapshotExecutorCount(pCtx *preemptionCtx, wl *kueue.Workload) (int32, bool
 	if info == nil {
 		return 0, false
 	}
-	return executorCount(info), true
+	return podSetRequestCount(info, victimPodSet), true
 }
 
 func TestPlanPreemption(t *testing.T) {
@@ -173,7 +162,7 @@ func TestPlanPreemption(t *testing.T) {
 			if got := target.PartialPreemption.RetainedCount; got != wantFloor {
 				t.Errorf("PartialPreemption.RetainedCount = %d, want %d", got, wantFloor)
 			}
-			if got := executorCount(target.PartialPreemption.ReducedInfo); got != wantFloor {
+			if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != wantFloor {
 				t.Errorf("ReducedInfo executor count = %d, want %d", got, wantFloor)
 			}
 		})
@@ -203,25 +192,25 @@ func TestFillbackPartialPreemption(t *testing.T) {
 			quota: "6", incomingCPU: "1",
 			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
 			wantDropped:  true,
-			wantSnapshot: ptr.To[int32](5),
+			wantSnapshot: new(int32(5)),
 		},
 		"grows back to the largest count that fits": {
 			quota: "6", incomingCPU: "4",
 			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: ptr.To[int32](2),
-			wantSnapshot: ptr.To[int32](2),
+			wantRetained: new(int32(2)),
+			wantSnapshot: new(int32(2)),
 		},
 		"never grows above the in-flight retained count": {
 			quota: "6", incomingCPU: "4",
-			victim:       partialPreemptionVictim(victimName, 0, 5, 1, ptr.To[int32](1)),
-			wantRetained: ptr.To[int32](1),
-			wantSnapshot: ptr.To[int32](1),
+			victim:       partialPreemptionVictim(victimName, 0, 5, 1, new(int32(1))),
+			wantRetained: new(int32(1)),
+			wantSnapshot: new(int32(1)),
 		},
 		"settles at the floor when only the floor fits": {
 			quota: "6", incomingCPU: "5",
 			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: ptr.To[int32](1),
-			wantSnapshot: ptr.To[int32](1),
+			wantRetained: new(int32(1)),
+			wantSnapshot: new(int32(1)),
 		},
 		"whole-evicted victim stays evicted when even the floor does not fit": {
 			quota: "6", incomingCPU: "6",
@@ -233,8 +222,8 @@ func TestFillbackPartialPreemption(t *testing.T) {
 		"shrunk victim settles at the floor when even the floor does not fit": {
 			quota: "6", incomingCPU: "6",
 			victim:       partialPreemptionVictim(victimName, 0, 5, 1, nil),
-			wantRetained: ptr.To[int32](1),
-			wantSnapshot: ptr.To[int32](1),
+			wantRetained: new(int32(1)),
+			wantSnapshot: new(int32(1)),
 		},
 	}
 	for name, tc := range cases {
@@ -292,7 +281,7 @@ func TestFillbackPartialPreemption(t *testing.T) {
 			if got := target.PartialPreemption.RetainedCount; got != *tc.wantRetained {
 				t.Errorf("PartialPreemption.RetainedCount = %d, want %d", got, *tc.wantRetained)
 			}
-			if got := executorCount(target.PartialPreemption.ReducedInfo); got != *tc.wantRetained {
+			if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != *tc.wantRetained {
 				t.Errorf("ReducedInfo executor count = %d, want %d", got, *tc.wantRetained)
 			}
 		})
@@ -371,8 +360,8 @@ func TestPartialPlanFillBack(t *testing.T) {
 					{WorkloadInfo: origByName["n"], Reason: "whole", WorkloadCq: cq},
 				}
 			},
-			wantRetained: map[string]*int32{"v": ptr.To[int32](4), "n": nil},
-			wantSnapshot: map[string]*int32{"v": ptr.To[int32](4), "n": nil},
+			wantRetained: map[string]*int32{"v": new(int32(4)), "n": nil},
+			wantSnapshot: map[string]*int32{"v": new(int32(4)), "n": nil},
 		},
 		"drops every target when the preemptor no longer needs the quota": {
 			quota: "20", incomingCPU: "5",
@@ -393,7 +382,7 @@ func TestPartialPlanFillBack(t *testing.T) {
 				}
 			},
 			wantRetained: map[string]*int32{},
-			wantSnapshot: map[string]*int32{"v": ptr.To[int32](5), "n": ptr.To[int32](5)},
+			wantSnapshot: map[string]*int32{"v": new(int32(5)), "n": new(int32(5))},
 		},
 		"routes a whole-eviction stage of a shrinkable victim through the partial search": {
 			quota: "9", incomingCPU: "5",
@@ -403,8 +392,8 @@ func TestPartialPlanFillBack(t *testing.T) {
 					{WorkloadInfo: origByName["v"], Reason: "whole", WorkloadCq: cq},
 				}
 			},
-			wantRetained: map[string]*int32{"v": ptr.To[int32](4)},
-			wantSnapshot: map[string]*int32{"v": ptr.To[int32](4)},
+			wantRetained: map[string]*int32{"v": new(int32(4))},
+			wantSnapshot: map[string]*int32{"v": new(int32(4))},
 		},
 	}
 	for name, tc := range cases {
@@ -486,6 +475,8 @@ var _ candidateIterator = (*scriptedIterator)(nil)
 
 func (s *scriptedIterator) Reset() { s.idx = 0 }
 
+func (s *scriptedIterator) Close() {}
+
 func (s *scriptedIterator) Next(borrow bool) *Target {
 	if s.idx >= len(s.candidates) {
 		return nil
@@ -531,7 +522,7 @@ func assertStages(t *testing.T, got []*Target, want []wantStage) {
 		if got := target.PartialPreemption.RetainedCount; got != *want[i].retained {
 			t.Errorf("target[%d] (%q): RetainedCount = %d, want %d", i, want[i].name, got, *want[i].retained)
 		}
-		if got := executorCount(target.PartialPreemption.ReducedInfo); got != *want[i].retained {
+		if got := podSetRequestCount(target.PartialPreemption.ReducedInfo, victimPodSet); got != *want[i].retained {
 			t.Errorf("target[%d] (%q): ReducedInfo executor count = %d, want %d",
 				i, want[i].name, got, *want[i].retained)
 		}
@@ -550,7 +541,7 @@ func TestPartialPlanWalk(t *testing.T) {
 	e1 := evicted("e1")
 	e2 := evicted("e2")
 	// p is an in-flight partial-preemption victim (reclaim target 2, floor 1).
-	p := partialPreemptionVictim("p", 0, 5, 1, ptr.To[int32](2))
+	p := partialPreemptionVictim("p", 0, 5, 1, new(int32(2)))
 	s := partialPreemptionVictim("s", 0, 5, 1, nil)
 	n := partialPreemptionVictim("n", 0, 5, 5, nil)
 
@@ -566,8 +557,8 @@ func TestPartialPlanWalk(t *testing.T) {
 			victims: []*kueue.Workload{e, p, s, n},
 			want: []wantStage{
 				{name: "e"},
-				{name: "p", retained: ptr.To[int32](1)},
-				{name: "s", retained: ptr.To[int32](1)},
+				{name: "p", retained: new(int32(1))},
+				{name: "s", retained: new(int32(1))},
 				{name: "p"},
 				{name: "s"},
 				{name: "n"},
@@ -579,7 +570,7 @@ func TestPartialPlanWalk(t *testing.T) {
 			stopAfter: 2,
 			want: []wantStage{
 				{name: "e"},
-				{name: "p", retained: ptr.To[int32](1)},
+				{name: "p", retained: new(int32(1))},
 			},
 		},
 		"whole-evicts the whole evicted prefix": {
@@ -587,7 +578,7 @@ func TestPartialPlanWalk(t *testing.T) {
 			want: []wantStage{
 				{name: "e1"},
 				{name: "e2"},
-				{name: "s", retained: ptr.To[int32](1)},
+				{name: "s", retained: new(int32(1))},
 				{name: "s"},
 			},
 			wantCont: true,

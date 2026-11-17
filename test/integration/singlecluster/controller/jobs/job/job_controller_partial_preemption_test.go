@@ -82,7 +82,7 @@ func expectPodCounts(ctx context.Context, namespace, podNamePrefix string, podSe
 
 // This exercises the full reactive partial-preemption loop for batch/Job, end to end:
 //
-//	request  - the scheduler sets PreemptionRetainedCount when the preemptor arrives,
+//	request  - the scheduler sets partialPreemption.retainedCount when the preemptor arrives,
 //	drain    - the Job reconciler evicts the victim's excess Pods down to the target,
 //	release  - the ungater lowers the admitted count and flips PartiallyPreempted to QuotaReleased,
 //	admit    - the freed quota admits the preemptor,

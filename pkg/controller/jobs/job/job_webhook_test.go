@@ -1514,17 +1514,120 @@ func TestValidateUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "adding a partial preemption opt-in without a podFailurePolicy is rejected on update",
+			name: "adding a partial preemption opt-in is rejected on update",
 			oldJob: testingutil.MakeJob("job", "default").
 				Queue("queue").
 				Indexed(true).
 				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				Obj(),
+			newJob: setPodFailurePolicyIgnoreDisruptionTarget(testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Indexed(true).
+				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				SetAnnotation(kueueconstants.PartialPreemptionAnnotation, "true").
+				Obj()),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(partialPreemptionAnnotationPath, true, apivalidation.FieldImmutableErrorMsg),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:            true,
+				features.ElasticJobsViaWorkloadSlices: true,
+			},
+		},
+		{
+			name: "changing the partial preemption floor to an invalid value is rejected on update",
+			oldJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Parallelism(4).
+				Completions(4).
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "1").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Parallelism(4).
+				Completions(4).
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "5").
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(partialPreemptionMinRetainedCountAnnotationPath, 5, "should be less than 4"),
+			},
+			featureGates: map[featuregate.Feature]bool{features.PartialPreemption: true},
+		},
+		{
+			name: "partial preemption floor is revalidated when the pod count drops while suspended",
+			oldJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Parallelism(4).
+				Completions(4).
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "3").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Parallelism(2).
+				Completions(2).
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "3").
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Invalid(partialPreemptionMinRetainedCountAnnotationPath, 3, "should be less than 2"),
+			},
+			featureGates: map[featuregate.Feature]bool{features.PartialPreemption: true},
+		},
+		{
+			name: "unchanged invalid partial preemption floor does not block unrelated updates",
+			oldJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "abc").
+				Label("team", "a").
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				PodAnnotation(kueueconstants.PodSetPartialPreemptionMinRetainedCountAnnotation, "abc").
+				Label("team", "b").
+				Obj(),
+			wantValidationErrs: nil,
+			featureGates:       map[featuregate.Feature]bool{features.PartialPreemption: true},
+		},
+		{
+			name: "suspend update with the opt-in unchanged is rejected for a job without a podFailurePolicy",
+			oldJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Indexed(true).
+				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				SetAnnotation(kueueconstants.PartialPreemptionAnnotation, "true").
+				Suspend(false).
 				Obj(),
 			newJob: testingutil.MakeJob("job", "default").
 				Queue("queue").
 				Indexed(true).
 				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
 				SetAnnotation(kueueconstants.PartialPreemptionAnnotation, "true").
+				Suspend(true).
+				Obj(),
+			wantValidationErrs: field.ErrorList{
+				field.Required(podFailurePolicyPath,
+					fmt.Sprintf("must contain a rule with action %q ignoring the %q pod condition when partial preemption is enabled",
+						batchv1.PodFailurePolicyActionIgnore, corev1.DisruptionTarget)),
+			},
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:            true,
+				features.ElasticJobsViaWorkloadSlices: true,
+			},
+		},
+		{
+			name: "unsuspend update with the opt-in unchanged is rejected for a job without a podFailurePolicy",
+			oldJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Indexed(true).
+				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				SetAnnotation(kueueconstants.PartialPreemptionAnnotation, "true").
+				Suspend(true).
+				Obj(),
+			newJob: testingutil.MakeJob("job", "default").
+				Queue("queue").
+				Indexed(true).
+				SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+				SetAnnotation(kueueconstants.PartialPreemptionAnnotation, "true").
+				Suspend(false).
 				Obj(),
 			wantValidationErrs: field.ErrorList{
 				field.Required(podFailurePolicyPath,

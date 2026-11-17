@@ -1220,14 +1220,14 @@ func (in *PodSet) DeepCopyInto(out *PodSet) {
 		*out = new(int32)
 		**out = **in
 	}
-	if in.PartialPreemption != nil {
-		in, out := &in.PartialPreemption, &out.PartialPreemption
-		*out = new(PodSetPartialPreemption)
-		(*in).DeepCopyInto(*out)
-	}
 	if in.TopologyRequest != nil {
 		in, out := &in.TopologyRequest, &out.TopologyRequest
 		*out = new(PodSetTopologyRequest)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.PartialPreemption != nil {
+		in, out := &in.PartialPreemption, &out.PartialPreemption
+		*out = new(PodSetPartialPreemption)
 		(*in).DeepCopyInto(*out)
 	}
 }

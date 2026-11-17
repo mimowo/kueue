@@ -64,7 +64,7 @@ func PartialPreemptionPodSet(wl *kueue.Workload, requests []PodSetResources) (ku
 }
 
 // HasPendingPreemptionRetainedCount reports whether any admitted PodSet still has an in-flight
-// partial-preemption reclaim target above its current effective count.
+// partial-preemption request above its current effective count.
 func HasPendingPreemptionRetainedCount(wl *kueue.Workload) bool {
 	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil {
 		return false
@@ -109,9 +109,9 @@ func PreemptionMinRetainedCount(wl *kueue.Workload, podSetName kueue.PodSetRefer
 }
 
 // ReleaseSatisfiedPreemptionTargets updates the partial-preemption condition after
-// all reclaim targets have been reached. The retainedCount field is intentionally
-// left in place: it records Kueue's decision and has no further effect once
-// count <= retainedCount.
+// every partial-preemption request has been satisfied. The retainedCount field is
+// intentionally left in place: it records Kueue's decision and has no further
+// effect once count <= retainedCount.
 func ReleaseSatisfiedPreemptionTargets(wl *kueue.Workload, now time.Time) bool {
 	if !IsPartialPreemptionJob(wl) || wl.Status.Admission == nil || !meta.IsStatusConditionTrue(wl.Status.Conditions, kueue.WorkloadPartiallyPreempted) {
 		return false
@@ -121,6 +121,6 @@ func ReleaseSatisfiedPreemptionTargets(wl *kueue.Workload, now time.Time) bool {
 	}
 	SetPartiallyPreemptedCondition(wl, now, false,
 		kueue.WorkloadPartiallyPreemptedReasonQuotaReleased,
-		"Partial-preemption reclaim target satisfied; quota released")
+		"Partial-preemption request satisfied; quota released")
 	return true
 }

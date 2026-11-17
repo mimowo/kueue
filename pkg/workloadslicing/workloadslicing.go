@@ -398,7 +398,7 @@ func normalizeActiveSlices(
 		}
 	}
 
-	// A partial-preemption reclaim target landing on the admitted slice after the
+	// A partial-preemption request landing on the admitted slice after the
 	// replacement was created makes that replacement stale: the scale-up it
 	// represents should be retracted so reconcilePartialPreemption sees (and can
 	// shrink) the slice that actually owns the excess Pods, instead of the

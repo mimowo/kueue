@@ -5258,7 +5258,7 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 		},
 		"no fit: do not return an in-flight partial target": {
 			quota:    "6",
-			victims:  []*kueue.Workload{partialPreemptionVictim("victim", 0, 5, 1, ptr.To[int32](2))},
+			victims:  []*kueue.Workload{partialPreemptionVictim("victim", 0, 5, 1, new(int32(2)))},
 			incoming: utiltestingapi.MakeWorkload("no-fit", "").UID("wl-no-fit").Priority(1).Request(corev1.ResourceCPU, "7").Obj(),
 			want:     nil,
 		},
@@ -5673,9 +5673,10 @@ func getPartialPreemptionTargetsForCohort(
 
 // TestPartialPreemptionFillBackCohort1Regression covers cohort "coh1": P nominal
 // 8, A nominal 2, B nominal 0 (10 total). A is used at 4 (floor 2), B at 4
-// (floor 3). Whole-evicting B and shrinking A to its floor frees 4+2=6 on top
-// of the 0 already free, more than P's request of 7 needs; fillBack must grow
-// A back from its floor (2) to 3, the largest count that still fits.
+// (floor 3). The 8 used leave 2 free; whole-evicting B and shrinking A to its
+// floor frees 4+2=6 more (8 free in total), more than P's request of 7 needs;
+// fillBack must grow A back from its floor (2) to 3, the largest count that
+// still fits.
 func TestPartialPreemptionFillBackCohort1Regression(t *testing.T) {
 	features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
 

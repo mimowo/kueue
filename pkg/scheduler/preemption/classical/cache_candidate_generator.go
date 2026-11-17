@@ -99,8 +99,7 @@ func (b *bucket) reset() {
 }
 
 // buildBuckets turns a list of classified ClusterQueues into their evicted and
-// non-evicted buckets, one bucket each per CQ, split at the cache-computed
-// evictedCount.
+// non-evicted buckets, one bucket each per CQ.
 func buildBuckets(classes []classifiedClusterQueue) (evicted, nonEvicted []*bucket) {
 	for _, cc := range classes {
 		if len(cc.sortedWorkloads) == 0 {
