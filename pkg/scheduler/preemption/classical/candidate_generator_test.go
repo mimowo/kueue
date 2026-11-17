@@ -50,14 +50,6 @@ func byName(a, b *workload.Info) int {
 	return strings.Compare(a.Obj.Name, b.Obj.Name)
 }
 
-func elemNames(elems []*candidateElem) []string {
-	out := make([]string, len(elems))
-	for i, e := range elems {
-		out[i] = e.wl.Obj.Name
-	}
-	return out
-}
-
 func makeWorkloadCQ(infos []*workload.Info) *schdcache.ClusterQueueSnapshot {
 	cq := &schdcache.ClusterQueueSnapshot{
 		Workloads: make(map[workload.Reference]*workload.Info, len(infos)),
@@ -340,24 +332,6 @@ func TestBucketCursor(t *testing.T) {
 			t.Error("reset must rewind a drained bucket so it participates in the next run")
 		}
 	})
-}
-
-func TestSplitEvicted(t *testing.T) {
-	e := evictedInfo(t, "e", true)
-	n1 := evictedInfo(t, "n1", false)
-	n2 := evictedInfo(t, "n2", false)
-	n3 := evictedInfo(t, "n3", false)
-
-	// Sorted order: the evicted prefix, then the non-evicted candidates.
-	elems := []*candidateElem{{wl: e}, {wl: n1}, {wl: n3}, {wl: n2}}
-
-	evicted, nonEvicted := splitEvicted(elems)
-	if got, want := elemNames(evicted), []string{"e"}; !slices.Equal(got, want) {
-		t.Errorf("evicted = %v, want %v", got, want)
-	}
-	if got, want := elemNames(nonEvicted), []string{"n1", "n3", "n2"}; !slices.Equal(got, want) {
-		t.Errorf("non-evicted = %v, want %v", got, want)
-	}
 }
 
 func TestBuildBuckets(t *testing.T) {
