@@ -131,13 +131,11 @@ func fairPreemptionStrategy(
 			cont = iterateWithSecondFsStrategy(log, preemptionCtx, candidateWls, yieldWithoutSimulatedUsage)
 		}
 
-		if cont && len(fsStrategies) == 1 && preemptionCtx.strategyFloors != nil {
-			// A partialPlan walks the candidates to shrink them, and there is no
-			// second strategy for the candidates that the strategy does not let
-			// shrink to their floor: they shrink as far as the strategy accepts.
-			preemptionCtx.searchAboveFloor = true
-			_, cont = iterateWithFirstFsStrategy(log, preemptionCtx, candidateWls, fsStrategies[0], yieldWithoutSimulatedUsage)
-			preemptionCtx.searchAboveFloor = false
+		if left := preemptionCtx.leftToShrink(candidateWls); cont && len(left) > 0 {
+			// A partialPlan walks the candidates to shrink them. The ones that no
+			// strategy let shrink to their floor shrink as far as the first
+			// strategy accepts.
+			_, cont = iterateWithFirstFsStrategy(log, preemptionCtx, left, fsStrategies[0], yieldWithoutSimulatedUsage)
 		}
 
 		revertSimulation()

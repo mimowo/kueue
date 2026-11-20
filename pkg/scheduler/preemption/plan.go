@@ -140,6 +140,13 @@ type partialPlan struct {
 	// byKey indexes the victims by Workload, for a walk to find a victim that
 	// was offered before.
 	byKey map[workload.Reference]*victim
+	// strategyFloors holds the lowest count that the strategy accepts for a
+	// candidate that it is about to offer (see usageTakenFrom).
+	strategyFloors map[workload.Reference]int32
+	// searchAboveFloor makes usageTakenFrom try counts above the floor of a
+	// candidate too, to find the lowest one that the strategy accepts (see
+	// leftToShrink).
+	searchAboveFloor bool
 	// done tells that the plan has nothing to try: no victim can shrink.
 	done bool
 }
@@ -150,7 +157,11 @@ func newPartialPlan(strategy PreemptionStrategy) *partialPlan {
 	if !features.Enabled(features.PartialPreemption) {
 		return nil
 	}
-	return &partialPlan{strategy: strategy, byKey: make(map[workload.Reference]*victim)}
+	return &partialPlan{
+		strategy:       strategy,
+		byKey:          make(map[workload.Reference]*victim),
+		strategyFloors: make(map[workload.Reference]int32),
+	}
 }
 
 // shrink walks the candidates and returns the targets that make the workload
@@ -161,12 +172,12 @@ func (p *partialPlan) shrink(ctx context.Context) []*Target {
 		return nil
 	}
 	defer p.restore()
-	p.strategy.pCtx.strategyFloors = make(map[workload.Reference]int32)
+	p.strategy.pCtx.shrinkingPlan = p
 	for candidate := range p.strategy.candidates {
 		v := p.memorize(candidate)
 		p.set(v, v.shrunk())
 	}
-	p.strategy.pCtx.strategyFloors = nil
+	p.strategy.pCtx.shrinkingPlan = nil
 	if !slices.ContainsFunc(p.victims, (*victim).canShrink) {
 		// The search without partial preemption finds the same targets.
 		p.done = true
@@ -187,9 +198,9 @@ func (p *partialPlan) shrink(ctx context.Context) []*Target {
 // count that it keeps then is the floor of the strategy for the candidate: the
 // plan does not shrink it further.
 func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, acceptsRelease func(workload.Usage) bool) workload.Usage {
-	target := Target{WorkloadInfo: wl}
+	p, target := c.shrinkingPlan, Target{WorkloadInfo: wl}
 	podSet := shrinkablePodSet(&target)
-	if c.strategyFloors == nil || podSet == "" {
+	if p == nil || podSet == "" {
 		return wl.Usage()
 	}
 	takenWith := func(keep int32) workload.Usage {
@@ -201,7 +212,7 @@ func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, acceptsRelease func(wo
 	// up: the floor, or with searchAboveFloor any count that takes Pods from the
 	// candidate and leaves it no more than a shrink in progress does.
 	counts := 1
-	if c.searchAboveFloor {
+	if p.searchAboveFloor {
 		most := podSetRequestCount(wl, podSet) - 1
 		if inProgress, shrinking := workload.PreemptionRetainedCount(wl.Obj, podSet); shrinking {
 			most = min(most, inProgress)
@@ -214,8 +225,29 @@ func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, acceptsRelease func(wo
 		// usage either.
 		return wl.Usage()
 	}
-	c.strategyFloors[workload.Key(wl.Obj)] = floor + int32(found)
+	p.strategyFloors[workload.Key(wl.Obj)] = floor + int32(found)
 	return takenWith(floor + int32(found))
+}
+
+// leftToShrink returns the candidates that the strategy has not offered in the
+// walk in which a partialPlan shrinks the candidates, for a strategy that has
+// no other way to offer them than to judge them once more. This time
+// usageTakenFrom takes from a candidate as much as the strategy accepts, even
+// if that leaves the candidate more than its floor. leftToShrink returns nil in
+// any other walk.
+func (c *preemptionCtx) leftToShrink(candidates []*workload.Info) []*workload.Info {
+	p := c.shrinkingPlan
+	if p == nil {
+		return nil
+	}
+	p.searchAboveFloor = true
+	var left []*workload.Info
+	for _, wl := range candidates {
+		if _, offered := p.byKey[workload.Key(wl.Obj)]; !offered {
+			left = append(left, wl)
+		}
+	}
+	return left
 }
 
 // walkOrder returns a copy of the candidates that the search without partial
@@ -327,7 +359,7 @@ func (p *partialPlan) memorize(candidate *Target) *victim {
 		p.byKey[key] = v
 		p.victims = append(p.victims, v)
 	}
-	if floor, accepted := p.strategy.pCtx.strategyFloors[key]; accepted {
+	if floor, accepted := p.strategyFloors[key]; accepted {
 		v.strategyFloor = floor
 	}
 	v.keep, v.current = keepNone, nil

@@ -407,6 +407,40 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			incoming:      incoming(10, "4"),
 			want:          []planTarget{shrink("b1", 2)},
 		},
+		// "a" and "b" own 2 each, "c" owns 6 and uses none of it. "b" uses 6 with
+		// b1, which cannot shrink, and b2 (floor 1). A request of 5 in "a" borrows
+		// 3 and has to free 1. No rule lets b2 shrink to its floor: the rule that
+		// compares the shares before the preemption offers b1, the first candidate
+		// of "b", and no other. The final share rule accepts b2 with 2 Pods.
+		"Fair Sharing, both rules: a borrower that no rule lets shrink to its floor shrinks as far as the final share rule accepts": {
+			fairSharing:   &config.FairSharing{},
+			clusterQueues: cohort("2", "2", "6"),
+			victims: []*kueue.Workload{
+				partialPreemptionVictimInCQ("b", "b1", 0, 3, 3),
+				partialPreemptionVictimInCQ("b", "b2", 1, 3, 1),
+			},
+			incoming: incoming(10, "5"),
+			want:     []planTarget{shrink("b2", 2)},
+		},
+		// "a" owns 8 and uses 2 with a1, "b" owns 4 and uses 12 with b1 (floor 1)
+		// and b2, which cannot shrink, "c" owns 3 and uses none of it. A request
+		// of 8 in "a" has to free 7. b1 is judged before a1 gives up its Pods, and
+		// not again by the final share rule. The other rule offers it, and it
+		// shrinks to its floor in the walk, where "b" still borrows. b1 is not
+		// left for the final share rule to judge it once more: it is not in the
+		// snapshot whole anymore.
+		"Fair Sharing, both rules, FairSharingReevaluatePreemptionCandidates off: a borrower that a rule offered is not judged once more": {
+			candidatesJudgedOnce: true,
+			fairSharing:          &config.FairSharing{},
+			clusterQueues:        ownQueuesAndSpare,
+			victims: []*kueue.Workload{
+				partialPreemptionVictimInCQ("a", "a1", 50, 2, 0),
+				partialPreemptionVictimInCQ("b", "b1", 50, 8, 1),
+				partialPreemptionVictimInCQ("b", "b2", 60, 4, 4),
+			},
+			incoming: incoming(100, "8"),
+			want:     []planTarget{shrink("a1", 0), shrink("b1", 3)},
+		},
 		"Fair Sharing: a shrink that is not fair after an eviction is taken back": {
 			fairSharing:   &config.FairSharing{},
 			clusterQueues: ownQueues,
