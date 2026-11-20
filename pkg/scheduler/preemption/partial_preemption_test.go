@@ -102,6 +102,26 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 		partialPreemptionVictimInCQ("b", "b1", 0, 5, 0),
 		partialPreemptionVictimInCQ("b", "b2", 1, 6, 2),
 	}
+	// The rule that compares the shares after the preemption, on its own.
+	finalShare := &config.FairSharing{PreemptionStrategies: []config.PreemptionStrategy{config.LessThanOrEqualToFinalShare}}
+	// "a", "b" and "c" own 2 each, and "b" uses 6 with b1. A request of 3 in "a"
+	// borrows 1. Evicting b1 leaves "b" a smaller share than "a", which is not
+	// fair by that rule. Shrinking it to 3 Pods leaves both the same share.
+	fairToShrink := func(floor int32) []*kueue.Workload {
+		return []*kueue.Workload{partialPreemptionVictimInCQ("b", "b1", 0, 6, floor)}
+	}
+	// "a" owns 8 and uses 4 with a1, which can shrink to no Pods. "b" owns 4 and
+	// uses 8 with b1, which cannot shrink, and b2, which can shrink to 2 Pods. A
+	// request of 7 in "a" has to free 7. While "b" borrows, shrinking b2 is fair.
+	// It is not once b1 is evicted and "b" does not borrow anymore: the shrink
+	// of b2 is taken back, and a1 gives up one more Pod instead.
+	ownQueues := cohort("8", "4")
+	ownQueues[0].Spec.Preemption.WithinClusterQueue = kueue.PreemptionPolicyLowerPriority
+	shrinkNotFairAfterEviction := []*kueue.Workload{
+		partialPreemptionVictimInCQ("a", "a1", 50, 4, 0),
+		partialPreemptionVictimInCQ("b", "b1", 30, 5, 5),
+		partialPreemptionVictimInCQ("b", "b2", 50, 3, 2),
+	}
 
 	cases := map[string]struct {
 		gateDisabled bool
@@ -281,6 +301,36 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			clusterQueues: cohort("9", "3"),
 			victims:       unfairToShrink,
 			incoming:      incoming(0, "11"),
+		},
+		"Fair Sharing, final share rule, gate off: evicting the borrower is not fair": {
+			gateDisabled:  true,
+			fairSharing:   finalShare,
+			clusterQueues: cohort("2", "2", "2"),
+			victims:       fairToShrink(3),
+			incoming:      incoming(10, "3"),
+		},
+		"Fair Sharing, final share rule: a borrower is judged by what it gives up when it shrinks": {
+			fairSharing:   finalShare,
+			clusterQueues: cohort("2", "2", "2"),
+			victims:       fairToShrink(3),
+			incoming:      incoming(10, "3"),
+			want:          []planTarget{shrink("b1", 3)},
+		},
+		// Shrinking b1 to its floor of 4 Pods is fair, but it is not enough, and
+		// evicting b1 is not fair.
+		"Fair Sharing, final share rule, FairSharingVerifyFinalTargets off: a borrower is judged by all of its usage when it is evicted": {
+			finalTargetsNotVerified: true,
+			fairSharing:             finalShare,
+			clusterQueues:           cohort("2", "2", "2"),
+			victims:                 fairToShrink(4),
+			incoming:                incoming(10, "3"),
+		},
+		"Fair Sharing: a shrink that is not fair after an eviction is taken back": {
+			fairSharing:   &config.FairSharing{},
+			clusterQueues: ownQueues,
+			victims:       shrinkNotFairAfterEviction,
+			incoming:      incoming(100, "7"),
+			want:          []planTarget{shrink("a1", 2), evict("b1")},
 		},
 		"Fair Sharing, FairSharingVerifyFinalTargets off: a shrink is not verified": {
 			finalTargetsNotVerified: true,

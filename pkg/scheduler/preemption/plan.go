@@ -109,7 +109,9 @@ func (v *victim) shrunk() int32 {
 // The search without partial preemption walks the candidates leaving each one
 // removed, until the workload fits (see getTargets). The plan adds a walk that
 // puts each victim back with the least it keeps without a new eviction, so the
-// strategy offers the candidates that follow as if the victim had shrunk.
+// strategy offers the candidates that follow as if the victim had shrunk. In
+// that walk a strategy judges a candidate by what it gives up when it shrinks
+// (see usageTakenFrom).
 //
 // The plan memorizes the victims of both walks, and takes from them in two
 // steps:
@@ -122,7 +124,8 @@ func (v *victim) shrunk() int32 {
 //     were offered, until the workload fits.
 //
 // Then it gives back what the workload does not need, starting with what
-// disrupts the victims most (giveBack).
+// disrupts the victims most (giveBack), and takes back the shrinks that the
+// strategy does not accept (take).
 type partialPlan struct {
 	strategy PreemptionStrategy
 	// victims are the memorized candidates, in the order in which the strategy
@@ -152,19 +155,34 @@ func (p *partialPlan) shrink(ctx context.Context) []*Target {
 		return nil
 	}
 	defer p.restore()
+	p.strategy.pCtx.shrinking = true
 	for candidate := range p.strategy.candidates {
 		v := p.memorize(candidate)
 		p.set(v, v.shrunk())
 	}
+	p.strategy.pCtx.shrinking = false
 	if !slices.ContainsFunc(p.victims, (*victim).canShrink) {
 		// The search without partial preemption finds the same targets.
 		p.done = true
 		return nil
 	}
-	if !p.fits(ctx) {
-		return nil
+	return p.take(ctx, nil)
+}
+
+// usageTakenFrom returns the usage that the walk in progress takes from the
+// candidate: what is above its floor when a partialPlan walks the candidates
+// to shrink them and the candidate can shrink, and all of its usage otherwise.
+// A strategy that judges a candidate by the usage it gives up uses it.
+func (c *preemptionCtx) usageTakenFrom(wl *workload.Info) workload.Usage {
+	if c.shrinking {
+		target := Target{WorkloadInfo: wl}
+		if podSet := shrinkablePodSet(&target); podSet != "" {
+			floor, _ := workload.PreemptionMinRetainedCount(wl.Obj, podSet)
+			target.PartialPreemption = &policy.PartialPreemptionTarget{ReducedInfo: reducedInfoForPartialPreemption(wl, podSet, floor)}
+			return target.PreemptedUsage()
+		}
 	}
-	return p.finish(ctx)
+	return wl.Usage()
 }
 
 // walkOrder returns a copy of the candidates that the search without partial
@@ -194,20 +212,7 @@ func (p *partialPlan) evict(ctx context.Context, walked []*Target) []*Target {
 			evictions = append(evictions, v)
 		}
 	}
-	for _, v := range p.victims {
-		p.set(v, v.shrunk())
-	}
-	// The workload fits at the latest when all of these are evicted, as in the
-	// search without partial preemption.
-	fits := p.fits(ctx)
-	for i := 0; !fits && i < len(evictions); i++ {
-		p.set(evictions[i], keepNone)
-		fits = p.fits(ctx)
-	}
-	var targets []*Target
-	if fits {
-		targets = p.finish(ctx)
-	}
+	targets := p.take(ctx, evictions)
 	p.restore()
 	if targets == nil {
 		// The search without partial preemption goes on with its own targets.
@@ -216,6 +221,63 @@ func (p *partialPlan) evict(ctx context.Context, walked []*Target) []*Target {
 		}
 	}
 	return targets
+}
+
+// take returns the targets that make the workload fit with the given evictions,
+// nil if there are none or the strategy does not accept them. A shrink that the
+// strategy rejects on its own is taken back first: take tries once more, and
+// the victim does not shrink then.
+func (p *partialPlan) take(ctx context.Context, evictions []*victim) []*Target {
+	targets := p.attempt(ctx, evictions)
+	if p.takeBackRejectedShrinks(targets) {
+		targets = p.attempt(ctx, evictions)
+	}
+	if len(targets) == 0 || !p.strategy.accepts(ctx, targets) {
+		return nil
+	}
+	return targets
+}
+
+// attempt shrinks every victim, makes the evictions, in order, until the
+// workload fits, and gives back what the workload does not need. It returns
+// the targets for what is left, nil if the workload does not fit.
+func (p *partialPlan) attempt(ctx context.Context, evictions []*victim) []*Target {
+	for _, v := range p.victims {
+		p.set(v, v.shrunk())
+	}
+	// With the evictions of the search without partial preemption the workload
+	// fits at the latest when all of them are made, as in that search.
+	fits := p.fits(ctx)
+	for i := 0; !fits && i < len(evictions); i++ {
+		p.set(evictions[i], keepNone)
+		fits = p.fits(ctx)
+	}
+	if !fits {
+		return nil
+	}
+	return p.finish(ctx)
+}
+
+// takeBackRejectedShrinks checks every shrink among the targets with the
+// strategy on its own, in the state that the targets lead to, and makes the
+// victims of the rejected ones unable to shrink. A shrink can be rejected
+// although the strategy offered its victim: the strategy judged the victim
+// before the plan took from others. It reports whether it took any back.
+func (p *partialPlan) takeBackRejectedShrinks(targets []*Target) bool {
+	if p.strategy.verify == nil {
+		return false
+	}
+	tookBack := false
+	for _, target := range targets {
+		if target.PartialPreemption == nil {
+			continue
+		}
+		if valid, _ := p.strategy.verify([]*Target{target}); !valid {
+			p.byKey[workload.Key(target.WorkloadInfo.Obj)].podSet = ""
+			tookBack = true
+		}
+	}
+	return tookBack
 }
 
 // memorize returns the victim for the candidate, and records what the search
@@ -249,10 +311,7 @@ func shrinkablePodSet(candidate *Target) kueue.PodSetReference {
 }
 
 // finish gives back what the workload does not need, and returns the targets
-// for what the plan still takes from the victims. It returns nil if there are
-// none, or if the strategy does not accept them: it verifies them like the
-// targets of the search without partial preemption, so Fair Sharing verifies
-// them only with the FairSharingVerifyFinalTargets feature gate.
+// for what the plan still takes from the victims.
 func (p *partialPlan) finish(ctx context.Context) []*Target {
 	p.giveBack(ctx)
 
@@ -273,9 +332,6 @@ func (p *partialPlan) finish(ctx context.Context) []*Target {
 			}
 			targets = append(targets, &target)
 		}
-	}
-	if len(targets) == 0 || !p.strategy.accepts(ctx, targets) {
-		return nil
 	}
 	return targets
 }

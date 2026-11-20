@@ -83,6 +83,9 @@ type Preemptor struct {
 type PreemptionStrategy struct {
 	// candidates is a dynamic iterator over preemption candidates
 	// in order of decreasig preemption appeal.
+	// With partial preemption it runs more than once. Each run reads the snapshot
+	// again, and judges a candidate by preemptionCtx.usageTakenFrom if what the
+	// candidate gives up matters.
 	candidates iter.Seq[*Target]
 	// allowBorrowing determines wheteher borrowing is enabled in the scope of this strategy.
 	allowBorrowing bool
@@ -93,6 +96,8 @@ type PreemptionStrategy struct {
 	// verify checks whether the final target set satisfies this strategy's invariants.
 	// If nil, any target set that fits is valid. It returns whether the target set is valid
 	// and an optional failure reason.
+	// With partial preemption it is also called for one target of the set, in the
+	// state that the whole set leads to.
 	verify func(targets []*Target) (bool, string)
 	// targetsByKey indexes candidates yielded via Candidates() by their workload key.
 	targetsByKey map[workload.Reference]*Target
@@ -225,6 +230,9 @@ type preemptionCtx struct {
 	assignment            flavorassigner.Assignment
 	frsNeedPreemption     sets.Set[resources.FlavorResource]
 	configurableEvaluator *configurable.PreemptionEvaluator
+	// shrinking tells that a partialPlan walks the candidates to shrink them:
+	// it takes from a candidate only what is above its floor.
+	shrinking bool
 }
 
 func New(
