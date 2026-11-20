@@ -230,14 +230,14 @@ type preemptionCtx struct {
 	assignment            flavorassigner.Assignment
 	frsNeedPreemption     sets.Set[resources.FlavorResource]
 	configurableEvaluator *configurable.PreemptionEvaluator
-	// fairFloors is set while a partialPlan walks the candidates to shrink them.
-	// It holds the least that a candidate keeps for the strategy to offer it
-	// (see usageTakenFrom).
-	fairFloors map[workload.Reference]int32
-	// shrinkToFairFloor lets usageTakenFrom offer a candidate that fair accepts
-	// only if it keeps more than its floor. A strategy sets it for the
-	// candidates that it has no other way to offer.
-	shrinkToFairFloor bool
+	// strategyFloors is set while a partialPlan walks the candidates to shrink
+	// them. It holds the lowest count that the strategy accepts for a candidate
+	// that it is about to offer (see usageTakenFrom).
+	strategyFloors map[workload.Reference]int32
+	// searchAboveFloor makes usageTakenFrom try counts above the floor of a
+	// candidate too, to find the lowest one that the strategy accepts. A
+	// strategy sets it for the candidates that it has no other way to offer.
+	searchAboveFloor bool
 }
 
 func New(

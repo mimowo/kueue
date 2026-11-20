@@ -53,10 +53,10 @@ type victim struct {
 	// podSet is the PodSet that partial preemption may shrink, empty when the
 	// victim can only be evicted whole.
 	podSet kueue.PodSetReference
-	// fairFloor is the least that the victim keeps for the strategy to offer
-	// it, 0 if the strategy offers it whatever it keeps. It does not hold for a
-	// victim that the search without partial preemption evicts.
-	fairFloor int32
+	// strategyFloor is the lowest count that the strategy accepted for the
+	// victim when it offered it, 0 if it set no such bound. It does not hold for
+	// a victim that the search without partial preemption evicts.
+	strategyFloor int32
 	// keep is what the plan leaves to the victim right now.
 	keep int32
 	// current is the instance of the victim that is in the snapshot right now,
@@ -74,10 +74,11 @@ func (v *victim) canShrink() bool {
 	return v.podSet != ""
 }
 
-// floor is the lowest count that podSet may be shrunk to.
+// floor is the lowest count that podSet may be shrunk to: its own minimum, or
+// the floor of the strategy if that is higher.
 func (v *victim) floor() int32 {
 	floor, _ := workload.PreemptionMinRetainedCount(v.info().Obj, v.podSet)
-	return max(floor, v.fairFloor)
+	return max(floor, v.strategyFloor)
 }
 
 // full is the count of podSet that the victim is charged for.
@@ -160,12 +161,12 @@ func (p *partialPlan) shrink(ctx context.Context) []*Target {
 		return nil
 	}
 	defer p.restore()
-	p.strategy.pCtx.fairFloors = make(map[workload.Reference]int32)
+	p.strategy.pCtx.strategyFloors = make(map[workload.Reference]int32)
 	for candidate := range p.strategy.candidates {
 		v := p.memorize(candidate)
 		p.set(v, v.shrunk())
 	}
-	p.strategy.pCtx.fairFloors = nil
+	p.strategy.pCtx.strategyFloors = nil
 	if !slices.ContainsFunc(p.victims, (*victim).canShrink) {
 		// The search without partial preemption finds the same targets.
 		p.done = true
@@ -175,18 +176,20 @@ func (p *partialPlan) shrink(ctx context.Context) []*Target {
 }
 
 // usageTakenFrom returns the usage that the walk in progress takes from the
-// candidate, for a strategy that offers a candidate only if fair accepts what
-// the candidate gives up. fair has to accept every part of a usage that it
-// accepts.
+// candidate, for a strategy that offers a candidate only if it accepts what
+// the candidate gives up. acceptsRelease tells whether the strategy accepts
+// that the candidate gives up a usage. If the strategy accepts a release, it
+// must also accept releasing fewer Pods of the same PodSet.
 //
 // The search without partial preemption takes all the usage of a candidate.
 // When a partialPlan walks the candidates to shrink them, a candidate that can
-// shrink gives up the most that fair accepts, down to its floor, and the plan
-// does not shrink it further.
-func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, fair func(workload.Usage) bool) workload.Usage {
+// shrink gives up the most that the strategy accepts, down to its floor. The
+// count that it keeps then is the floor of the strategy for the candidate: the
+// plan does not shrink it further.
+func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, acceptsRelease func(workload.Usage) bool) workload.Usage {
 	target := Target{WorkloadInfo: wl}
 	podSet := shrinkablePodSet(&target)
-	if c.fairFloors == nil || podSet == "" {
+	if c.strategyFloors == nil || podSet == "" {
 		return wl.Usage()
 	}
 	takenWith := func(keep int32) workload.Usage {
@@ -194,23 +197,24 @@ func (c *preemptionCtx) usageTakenFrom(wl *workload.Info, fair func(workload.Usa
 		return target.PreemptedUsage()
 	}
 	floor, _ := workload.PreemptionMinRetainedCount(wl.Obj, podSet)
-	// The lowest count with which fair accepts what the candidate gives up: the
-	// floor, or with shrinkToFairFloor any count that takes Pods from the
+	// The lowest count with which the strategy accepts what the candidate gives
+	// up: the floor, or with searchAboveFloor any count that takes Pods from the
 	// candidate and leaves it no more than a shrink in progress does.
 	counts := 1
-	if c.shrinkToFairFloor {
+	if c.searchAboveFloor {
 		most := podSetRequestCount(wl, podSet) - 1
 		if inProgress, shrinking := workload.PreemptionRetainedCount(wl.Obj, podSet); shrinking {
 			most = min(most, inProgress)
 		}
 		counts = int(most - floor + 1)
 	}
-	found := sort.Search(counts, func(i int) bool { return fair(takenWith(floor + int32(i))) })
+	found := sort.Search(counts, func(i int) bool { return acceptsRelease(takenWith(floor + int32(i))) })
 	if found >= counts {
-		// fair accepts none of these, so it does not accept all the usage either.
+		// The strategy accepts none of these, so it does not accept all the
+		// usage either.
 		return wl.Usage()
 	}
-	c.fairFloors[workload.Key(wl.Obj)] = floor + int32(found)
+	c.strategyFloors[workload.Key(wl.Obj)] = floor + int32(found)
 	return takenWith(floor + int32(found))
 }
 
@@ -238,8 +242,9 @@ func (p *partialPlan) evict(ctx context.Context, walked []*Target) []*Target {
 	var evictions []*victim
 	for _, candidate := range walked {
 		if v := p.memorize(candidate); v.keep == keepNone {
-			// The search found it fair to take everything from the victim.
-			v.eviction, v.fairFloor = candidate, 0
+			// The strategy offered the victim to the search with nothing left
+			// to it.
+			v.eviction, v.strategyFloor = candidate, 0
 			evictions = append(evictions, v)
 		}
 	}
@@ -322,8 +327,8 @@ func (p *partialPlan) memorize(candidate *Target) *victim {
 		p.byKey[key] = v
 		p.victims = append(p.victims, v)
 	}
-	if fairFloor, judged := p.strategy.pCtx.fairFloors[key]; judged {
-		v.fairFloor = fairFloor
+	if floor, accepted := p.strategy.pCtx.strategyFloors[key]; accepted {
+		v.strategyFloor = floor
 	}
 	v.keep, v.current = keepNone, nil
 	cq := p.strategy.pCtx.snapshot.ClusterQueue(candidate.WorkloadInfo.ClusterQueue)
