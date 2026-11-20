@@ -441,6 +441,37 @@ func TestPartialPreemptionGetTargets(t *testing.T) {
 			incoming: incoming(100, "8"),
 			want:     []planTarget{shrink("a1", 0), shrink("b1", 3)},
 		},
+		// "a" and "b" own 2 each, "c" owns 6 and uses none of it. "b" uses 10 with
+		// b1 (floor 2) and b2 (floor 0). A request of 6 in "a" borrows 4 and has to
+		// free 6. The final share rule offers b1, the other rule offers b2, and
+		// the request fits when each of them keeps 2 Pods. That is not fair to b1:
+		// it gives up 2 Pods, and with them "b" borrows 4, not more than the
+		// request. The shrink of b1 is taken back, and b2 gives up all its Pods.
+		"Fair Sharing: a shrink that the usage given up does not justify is taken back": {
+			fairSharing:   &config.FairSharing{},
+			clusterQueues: cohort("2", "2", "6"),
+			victims: []*kueue.Workload{
+				partialPreemptionVictimInCQ("b", "b1", 0, 4, 2),
+				partialPreemptionVictimInCQ("b", "b2", 1, 6, 0),
+			},
+			incoming: incoming(10, "6"),
+			want:     []planTarget{shrink("b2", 0)},
+		},
+		// "a" owns 8 and uses 4 with a1 (floor 2), "b" owns 4 and uses 8 with b1,
+		// which cannot shrink. A request of 10 in "a" fits when both are evicted,
+		// and that is fair: without a1 the request borrows 2, less than "b". It
+		// also fits when b1 is evicted and a1 keeps 2 Pods, but then the request
+		// borrows 4, as much as "b": evicting b1 is not fair next to that shrink.
+		"Fair Sharing: an eviction that is not fair next to a shrink leaves the targets without partial preemption": {
+			fairSharing:   &config.FairSharing{},
+			clusterQueues: ownQueues,
+			victims: []*kueue.Workload{
+				partialPreemptionVictimInCQ("a", "a1", 50, 4, 2),
+				partialPreemptionVictimInCQ("b", "b1", 50, 8, 8),
+			},
+			incoming: incoming(100, "10"),
+			want:     []planTarget{evict("a1"), evict("b1")},
+		},
 		"Fair Sharing: a shrink that is not fair after an eviction is taken back": {
 			fairSharing:   &config.FairSharing{},
 			clusterQueues: ownQueues,
