@@ -131,6 +131,15 @@ func fairPreemptionStrategy(
 			cont = iterateWithSecondFsStrategy(log, preemptionCtx, candidateWls, yieldWithoutSimulatedUsage)
 		}
 
+		if cont && len(fsStrategies) == 1 && preemptionCtx.fairFloors != nil {
+			// A partialPlan walks the candidates to shrink them, and there is no
+			// second strategy for the candidates that the strategy does not let
+			// shrink to their floor: they shrink as far as the strategy accepts.
+			preemptionCtx.shrinkToFairFloor = true
+			_, cont = iterateWithFirstFsStrategy(log, preemptionCtx, candidateWls, fsStrategies[0], yieldWithoutSimulatedUsage)
+			preemptionCtx.shrinkToFairFloor = false
+		}
+
 		revertSimulation()
 
 		if cont && features.Enabled(features.ConfigurablePreemptions) {
@@ -298,7 +307,9 @@ func iterateWithFirstFsStrategy(
 		strategyLog := newFsStrategyLog(log, candCQ, preemptorNewShare, targetOldShare)
 		for candCQ.HasWorkload() {
 			candWl := candCQ.PopWorkload()
-			targetNewShare := candCQ.ComputeTargetShareAfterRemoval(preemptionCtx.usageTakenFrom(candWl))
+			targetNewShare := candCQ.ComputeTargetShareAfterRemoval(preemptionCtx.usageTakenFrom(candWl, func(taken workload.Usage) bool {
+				return fsStrategy(preemptorNewShare, targetOldShare, candCQ.ComputeTargetShareAfterRemoval(taken))
+			}))
 			passed := fsStrategy(preemptorNewShare, targetOldShare, targetNewShare)
 			strategyLog.record(candWl, targetNewShare, passed)
 			if passed {

@@ -84,8 +84,8 @@ type PreemptionStrategy struct {
 	// candidates is a dynamic iterator over preemption candidates
 	// in order of decreasig preemption appeal.
 	// With partial preemption it runs more than once. Each run reads the snapshot
-	// again, and judges a candidate by preemptionCtx.usageTakenFrom if what the
-	// candidate gives up matters.
+	// again, and asks preemptionCtx.usageTakenFrom what a candidate gives up if
+	// that decides whether the candidate is offered.
 	candidates iter.Seq[*Target]
 	// allowBorrowing determines wheteher borrowing is enabled in the scope of this strategy.
 	allowBorrowing bool
@@ -230,9 +230,14 @@ type preemptionCtx struct {
 	assignment            flavorassigner.Assignment
 	frsNeedPreemption     sets.Set[resources.FlavorResource]
 	configurableEvaluator *configurable.PreemptionEvaluator
-	// shrinking tells that a partialPlan walks the candidates to shrink them:
-	// it takes from a candidate only what is above its floor.
-	shrinking bool
+	// fairFloors is set while a partialPlan walks the candidates to shrink them.
+	// It holds the least that a candidate keeps for the strategy to offer it
+	// (see usageTakenFrom).
+	fairFloors map[workload.Reference]int32
+	// shrinkToFairFloor lets usageTakenFrom offer a candidate that fair accepts
+	// only if it keeps more than its floor. A strategy sets it for the
+	// candidates that it has no other way to offer.
+	shrinkToFairFloor bool
 }
 
 func New(
@@ -616,11 +621,11 @@ func (p *Preemptor) getTargets(ctx context.Context, strategies iter.Seq[Preempti
 			if workloadFits(ctx, strategy.pCtx, strategy.allowBorrowing) {
 				walked := plan.walkOrder(targets)
 				targets = fillBackWorkloads(ctx, strategy.pCtx, targets, strategy.allowBorrowing)
-				if partial := plan.evict(ctx, walked); partial != nil {
-					return partial
-				}
 				if !strategy.accepts(ctx, targets) {
 					break
+				}
+				if partial := plan.evict(ctx, walked); partial != nil {
+					return partial
 				}
 				restoreSnapshot(strategy.pCtx.snapshot, targets)
 				return targets
