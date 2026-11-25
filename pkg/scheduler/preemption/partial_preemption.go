@@ -52,9 +52,9 @@ type victim struct {
 	// target is the candidate as the strategy yielded it first. Its WorkloadInfo
 	// is the victim as it was when the search started.
 	target *Target
-	// eviction is the candidate as the search without partial preemption evicts
-	// it, nil if that search does not evict the victim. The plan evicts no other
-	// victim.
+	// eviction is the candidate as the eviction phase yielded it, nil if the
+	// victim was not escalated to eviction. Its WorkloadInfo is always the
+	// victim as it was when the search started.
 	eviction *Target
 	// podSet is the PodSet that partial preemption may shrink, empty when the
 	// victim can only be evicted whole.
@@ -64,6 +64,9 @@ type victim struct {
 	// current is the instance of the victim that is in the snapshot right now,
 	// nil when keep is keepNone.
 	current *workload.Info
+	// inBand reports whether the victim has been assigned to a band for
+	// reverse-band fill-back.
+	inBand bool
 }
 
 // info is the victim as it was when the search started.
@@ -103,47 +106,75 @@ func (v *victim) inProgress() int32 {
 // shrunk is the least that the victim keeps without a new eviction.
 func (v *victim) shrunk() int32 {
 	if v.canShrink() {
-		return v.floor()
+		return min(v.inProgress(), v.floor())
 	}
 	return v.inProgress()
 }
 
+type peerState struct {
+	victim  *victim
+	preKeep int32
+}
+
+// bandPeers records the victims touched in a single band together with the
+// keep state each had before entering that band.
+type bandPeers struct {
+	list   []peerState
+	preByV map[*victim]int32
+}
+
+func newBandPeers() *bandPeers {
+	return &bandPeers{preByV: make(map[*victim]int32)}
+}
+
+func (bp *bandPeers) record(v *victim, preKeep int32, bandVictims *[]*victim) {
+	if _, seen := bp.preByV[v]; seen {
+		return
+	}
+	bp.preByV[v] = preKeep
+	bp.list = append(bp.list, peerState{victim: v, preKeep: preKeep})
+	if !v.inBand {
+		v.inBand = true
+		*bandVictims = append(*bandVictims, v)
+	}
+}
+
+func (bp *bandPeers) preKeep(v *victim) int32 {
+	if keep, ok := bp.preByV[v]; ok {
+		return keep
+	}
+	return keepAll
+}
+
+func (bp *bandPeers) revert(p *partialPlan) {
+	for _, ps := range bp.list {
+		p.setKeep(ps.victim, ps.preKeep)
+	}
+}
+
 // partialPlan refines the preemption target search of one strategy with partial
-// preemption: victims shrink before any victim is evicted.
+// preemption across the strategy's live candidate bands. A strategy that
+// defines no bands is searched as one band that holds all its candidates.
 //
-// A strategy offers its candidates one at a time: it removes a candidate from
-// the snapshot, yields it, and looks at the snapshot again to pick the next one.
-// The search without partial preemption walks the candidates leaving each one
-// removed, until the workload fits (see getTargets). The plan adds a walk that
-// puts each victim back with the least it keeps without a new eviction, so the
-// strategy offers the candidates that follow as if the victim had shrunk.
-//
-// The plan memorizes the victims of both walks, and takes from them in two
-// steps:
-//
-//  1. shrink pass: every victim keeps the least it can without a new eviction: its
-//     floor if it can shrink, and otherwise what an eviction or a shrink that is
-//     already in progress leaves it;
-//  2. eviction pass: if that is not enough, the targets of the search without partial
-//     preemption are evicted on top of the shrinks, in the order in which they
-//     were offered, until the workload fits.
-//
-// Then it fills back what the workload does not need, starting with what
-// disrupts the victims most (fillBack).
+// Within each band, victims shrink first (shrinkBand). If that is not enough,
+// victims of the band are evicted on top of the shrinks (evictBand). Once the
+// workload fits, fillBack returns what the workload does not need, restoring
+// later (higher-priority) bands before earlier ones.
 type partialPlan struct {
 	strategy PreemptionStrategy
 	// victims are the memorized candidates, in the order in which the strategy
 	// offered them first.
 	victims []*victim
+	// bands partitions victims by the first band that touched them, in
+	// decreasing preemption appeal order, for reverse-band fill-back.
+	bands [][]*victim
 	// byKey indexes the victims by Workload, for a walk to find a victim that
 	// was offered before.
 	byKey map[workload.Reference]*victim
-	// done tells that the plan has nothing to try: no victim can shrink.
-	done bool
 }
 
 // newPartialPlan returns the plan for the strategy, nil if the PartialPreemption
-// feature gate is disabled. A nil plan finds no targets.
+// feature gate is disabled.
 func newPartialPlan(strategy PreemptionStrategy) *partialPlan {
 	if !features.Enabled(features.PartialPreemption) {
 		return nil
@@ -151,99 +182,318 @@ func newPartialPlan(strategy PreemptionStrategy) *partialPlan {
 	return &partialPlan{strategy: strategy, byKey: make(map[workload.Reference]*victim)}
 }
 
-// shrinkPass walks the candidates and returns the targets that make the workload
-// fit without a new eviction, the first step of the plan. It returns nil if
-// there are none, and leaves the snapshot as it found it.
-func (p *partialPlan) shrinkPass(ctx context.Context) []*Target {
-	if p == nil {
-		return nil
-	}
+// search walks the strategy's live bands in order and returns the targets
+// that make the workload fit, always restoring the snapshot before returning.
+// When fallback is true, the caller runs the whole-eviction search instead.
+func (p *partialPlan) search(ctx context.Context) ([]*Target, bool) {
 	defer p.restore()
-	p.strategy.pCtx.shrinkingPlan = p
-	for candidate := range p.strategy.candidates {
-		v := p.observe(candidate)
-		p.setKeep(v, v.shrunk())
-	}
-	p.strategy.pCtx.shrinkingPlan = nil
-	if !slices.ContainsFunc(p.victims, (*victim).canShrink) {
-		// The search without partial preemption finds the same targets.
-		p.done = true
-		return nil
-	}
-	if !p.fits(ctx) {
-		return nil
-	}
-	return p.buildTargets(ctx)
-}
 
-// walkOrder returns a copy of the candidates that the search without partial
-// preemption removed from the snapshot, in that order, for evictionPass: the fill-back
-// of the search reorders them. It returns nil if the plan has nothing to try.
-func (p *partialPlan) walkOrder(walked []*Target) []*Target {
-	if p == nil || p.done {
-		return nil
+	if p.creditInProgress(ctx) {
+		if targets := p.buildTargets(ctx); targets != nil {
+			return targets, false
+		}
+		return nil, true
 	}
-	return slices.Clone(walked)
-}
 
-// evictionPass returns the targets that make the workload fit by evicting victims on
-// top of the shrinks, the second step of the plan. walked are the candidates
-// that the search without partial preemption removed from the snapshot, in
-// that order. The ones that its fill-back did not put back are its targets: the
-// plan evicts no other victim. If evict returns targets, the snapshot is as the
-// search found it. Otherwise it is as evictionPass found it.
-func (p *partialPlan) evictionPass(ctx context.Context, walked []*Target) []*Target {
-	if p == nil || p.done {
-		return nil
-	}
-	var evictions []*victim
-	for _, candidate := range walked {
-		if v := p.observe(candidate); v.keep == keepNone {
-			v.eviction = candidate
-			evictions = append(evictions, v)
+	var lastWholeEvictions []*victim
+	lastBandIdx := -1
+	fits := false
+	for band := range p.strategy.candidateBands() {
+		bandIdx := len(p.bands)
+		lastBandIdx = bandIdx
+		p.bands = append(p.bands, nil)
+		peers := newBandPeers()
+
+		if p.shrinkBand(ctx, bandIdx, band, peers) {
+			saved := p.snapshotKeeps()
+			if targets := p.buildTargets(ctx); targets != nil {
+				return targets, false
+			}
+			p.restoreKeeps(saved)
+		}
+
+		fits, lastWholeEvictions = p.evictBand(ctx, bandIdx, band, peers)
+		if fits {
+			break
 		}
 	}
-	for _, v := range p.victims {
+	if !fits {
+		return nil, p.hasShrunkVictim()
+	}
+	if targets := p.buildTargets(ctx); targets != nil {
+		return targets, false
+	}
+	if lastWholeEvictions != nil && lastBandIdx == 0 {
+		return p.acceptWholeEvictions(ctx, lastBandIdx, lastWholeEvictions), false
+	}
+	return nil, true
+}
+
+// creditInProgress applies already-committed evictions and pending shrinks
+// across the strategy before opening the first band.
+func (p *partialPlan) creditInProgress(ctx context.Context) bool {
+	if p.strategy.inProgressCandidates == nil {
+		return false
+	}
+	credited := false
+	for candidate := range p.strategy.inProgressCandidates {
+		v, _ := p.observe(candidate)
+		keep := v.inProgress()
+		p.setKeep(v, keep)
+		if keep < keepAll {
+			credited = true
+		}
+	}
+	return credited && p.fits(ctx)
+}
+
+// shrinkBand runs the shrink phase for one band, putting each yielded peer
+// at its shrunk count, and reports whether the workload now fits.
+func (p *partialPlan) shrinkBand(ctx context.Context, bandIdx int, band candidateBand, peers *bandPeers) bool {
+	if band.shrinkCandidates == nil {
+		return false
+	}
+	p.strategy.pCtx.shrinkingPlan = p
+	defer func() { p.strategy.pCtx.shrinkingPlan = nil }()
+
+	hasShrinkable := false
+	for candidate := range band.shrinkCandidates {
+		v, prevKeep := p.observe(candidate)
+		peers.record(v, prevKeep, &p.bands[bandIdx])
+		if v.canShrink() {
+			hasShrinkable = true
+		}
 		p.setKeep(v, v.shrunk())
 	}
-	// The workload fits at the latest when all of these are evicted, as in the
-	// search without partial preemption.
-	fits := p.fits(ctx)
-	for i := 0; !fits && i < len(evictions); i++ {
-		p.setKeep(evictions[i], keepNone)
-		fits = p.fits(ctx)
+	return hasShrinkable && p.fits(ctx)
+}
+
+// evictBand escalates one band to whole evictions, chosen the way the search
+// without partial preemption chooses them. It undoes the shrinks of the band,
+// removes candidates in walk order until the workload fits, and drops the
+// evictions that the workload does not need. It then applies the remaining
+// evictions on top of the shrinks of the band, in walk order, until the
+// workload fits. It reports whether the workload fits, and returns the
+// evictions that are needed without any shrink.
+func (p *partialPlan) evictBand(ctx context.Context, bandIdx int, band candidateBand, peers *bandPeers) (bool, []*victim) {
+	if band.evictCandidates == nil {
+		return false, nil
 	}
-	var targets []*Target
-	if fits {
-		targets = p.buildTargets(ctx)
+	peers.revert(p)
+
+	var evicted []*victim
+	fits := false
+	for candidate := range band.evictCandidates {
+		// The walk removed the candidate from the snapshot, which evicts it.
+		v, prevKeep := p.observe(candidate)
+		peers.record(v, prevKeep, &p.bands[bandIdx])
+		evCopy := *candidate
+		evCopy.WorkloadInfo = v.info()
+		v.eviction = &evCopy
+		if prevKeep != keepNone {
+			evicted = append(evicted, v)
+		}
+		if p.fits(ctx) {
+			fits = true
+			break
+		}
 	}
-	p.restore()
-	if targets == nil {
-		// The search without partial preemption goes on with its own targets.
-		for _, v := range evictions {
+	if !fits {
+		return false, nil
+	}
+	evicted = p.filterNeededEvictions(ctx, peers, evicted)
+	return p.overlayEvictionsOnShrinks(ctx, band, peers, evicted), evicted
+}
+
+// filterNeededEvictions drops earlier evicted peers that are not needed for
+// whole eviction alone to fit (matching fillBackWorkloads).
+func (p *partialPlan) filterNeededEvictions(ctx context.Context, peers *bandPeers, evicted []*victim) []*victim {
+	if len(evicted) <= 1 {
+		return evicted
+	}
+	for _, ps := range peers.list {
+		if ps.victim.keep != keepNone {
+			p.setKeep(ps.victim, ps.preKeep)
+		}
+	}
+	surviving := slices.Clone(evicted)
+	for i := len(surviving) - 2; i >= 0; i-- {
+		v := surviving[i]
+		p.setKeep(v, peers.preKeep(v))
+		if p.fits(ctx) {
+			surviving = slices.Delete(surviving, i, i+1)
+		} else {
 			p.setKeep(v, keepNone)
 		}
+	}
+	return surviving
+}
+
+// overlayEvictionsOnShrinks adds the evictions, in walk order, to the shrinks
+// of the peers until the workload fits, and reports whether it does. A band
+// that re-checks eligibility shrinks a peer only while the peer is eligible,
+// which an eviction can change for the peers that share the eligibility scope
+// of the evicted victim.
+func (p *partialPlan) overlayEvictionsOnShrinks(
+	ctx context.Context,
+	band candidateBand,
+	peers *bandPeers,
+	evictions []*victim,
+) bool {
+	if len(evictions) == 0 {
+		return p.fits(ctx)
+	}
+	peers.revert(p)
+	p.shrinkEligible(band, peers.list)
+	scopes := groupByEligibilityScope(band, peers.list)
+	for _, v := range evictions {
+		p.setKeep(v, keepNone)
+		if band.eligibilityScope != nil {
+			p.reshrink(band, scopes[band.eligibilityScope(v.target)], v)
+		}
+		if p.fits(ctx) {
+			return true
+		}
+	}
+	return false
+}
+
+// shrinkEligible shrinks the peers in order, each of them only if the band
+// finds it eligible when its turn comes.
+func (p *partialPlan) shrinkEligible(band candidateBand, peers []peerState) {
+	for _, ps := range peers {
+		v := ps.victim
+		// An evicted victim keeps nothing, which is less than any count.
+		if v.shrunk() >= v.keep {
+			continue
+		}
+		if band.isEligible != nil && !band.isEligible(v.target) {
+			continue
+		}
+		p.setKeep(v, v.shrunk())
+	}
+}
+
+// peerScope holds, in walk order, the peers of a band that share an
+// eligibility scope.
+type peerScope struct {
+	peers []peerState
+	// severalClusterQueues tells that the peers are not all in one ClusterQueue.
+	severalClusterQueues bool
+}
+
+// groupByEligibilityScope returns the peers by eligibility scope, without the
+// peers that are eligible whatever the usage. It returns nil for a band that
+// does not re-check eligibility.
+func groupByEligibilityScope(band candidateBand, peers []peerState) map[any]*peerScope {
+	if band.eligibilityScope == nil {
+		return nil
+	}
+	scopes := make(map[any]*peerScope)
+	for _, ps := range peers {
+		key := band.eligibilityScope(ps.victim.target)
+		if key == nil {
+			continue
+		}
+		scope := scopes[key]
+		if scope == nil {
+			scope = &peerScope{}
+			scopes[key] = scope
+		} else if scope.peers[0].victim.info().ClusterQueue != ps.victim.info().ClusterQueue {
+			scope.severalClusterQueues = true
+		}
+		scope.peers = append(scope.peers, ps)
+	}
+	return scopes
+}
+
+// reshrink updates the shrinks of a scope after the eviction of one of its
+// peers, to the ones that shrinkEligible leaves with that eviction.
+func (p *partialPlan) reshrink(band candidateBand, scope *peerScope, evicted *victim) {
+	if scope == nil {
+		return
+	}
+	// The eviction leaves less usage to the ClusterQueue of the evicted victim
+	// and to the cohorts above it. A shrink in that ClusterQueue that still
+	// stands once the later shrinks are undone shows that the peers before it
+	// stay as they are. So undo the shrinks latest first down to that one, and
+	// shrink again from there.
+	first := 0
+	for i, ps := range slices.Backward(scope.peers) {
+		v := ps.victim
+		if v.keep == keepNone || v.keep == ps.preKeep {
+			continue
+		}
+		p.setKeep(v, ps.preKeep)
+		if v.info().ClusterQueue == evicted.info().ClusterQueue && band.isEligible(v.target) {
+			first = i
+			break
+		}
+	}
+	p.shrinkEligible(band, scope.peers[first:])
+	if !scope.severalClusterQueues {
+		// The peers of one ClusterQueue are eligible up to the same point of
+		// the walk, and an eviction only moves that point earlier: the peers
+		// after it do not shrink again.
+		scope.peers = scope.peers[:first+1]
+	}
+}
+
+// acceptWholeEvictions evaluates pure whole evictions for a single-band
+// search when strategy verification rejected shrunk targets.
+func (p *partialPlan) acceptWholeEvictions(ctx context.Context, bandIdx int, wholeEvictions []*victim) []*Target {
+	for _, v := range p.bands[bandIdx] {
+		if v.inProgress() == keepNone {
+			p.setKeep(v, keepNone)
+		} else {
+			p.setKeep(v, keepAll)
+		}
+	}
+	for _, v := range wholeEvictions {
+		p.setKeep(v, keepNone)
+	}
+	targets := p.collectTargets()
+	if len(targets) == 0 || !p.strategy.accepts(ctx, targets) {
+		return nil
 	}
 	return targets
 }
 
-// observe returns the victim for the candidate, and records what the search
-// left of it in the snapshot: nothing if it removed the candidate, and the
-// victim as it was when the search started otherwise.
-func (p *partialPlan) observe(candidate *Target) *victim {
+func (p *partialPlan) hasShrunkVictim() bool {
+	return slices.ContainsFunc(p.victims, func(v *victim) bool {
+		return v.keep != keepNone && v.keep != keepAll
+	})
+}
+
+func (p *partialPlan) snapshotKeeps() []peerState {
+	saved := make([]peerState, len(p.victims))
+	for i, v := range p.victims {
+		saved[i] = peerState{victim: v, preKeep: v.keep}
+	}
+	return saved
+}
+
+func (p *partialPlan) restoreKeeps(saved []peerState) {
+	for _, s := range saved {
+		p.setKeep(s.victim, s.preKeep)
+	}
+}
+
+// observe returns the victim for the candidate that a walk has just removed
+// from the snapshot, and what the plan left to the victim before that.
+func (p *partialPlan) observe(candidate *Target) (*victim, int32) {
 	key := workload.Key(candidate.WorkloadInfo.Obj)
 	v, found := p.byKey[key]
+	prevKeep := keepAll
 	if !found {
 		v = &victim{target: candidate, podSet: shrinkablePodSet(candidate)}
 		p.byKey[key] = v
 		p.victims = append(p.victims, v)
+	} else {
+		prevKeep = v.keep
 	}
 	v.keep, v.current = keepNone, nil
-	cq := p.strategy.pCtx.snapshot.ClusterQueue(candidate.WorkloadInfo.ClusterQueue)
-	if _, inSnapshot := cq.Workloads[key]; inSnapshot {
-		v.keep, v.current = keepAll, v.info()
-	}
-	return v
+	return v, prevKeep
 }
 
 // shrinkablePodSet returns the PodSet of the candidate that partial preemption
@@ -265,13 +515,20 @@ func shrinkablePodSet(candidate *Target) kueue.PodSetReference {
 func (p *partialPlan) buildTargets(ctx context.Context) []*Target {
 	p.fillBack(ctx)
 
+	targets := p.collectTargets()
+	if len(targets) == 0 || !p.strategy.accepts(ctx, targets) {
+		return nil
+	}
+	return targets
+}
+
+func (p *partialPlan) collectTargets() []*Target {
 	var targets []*Target
 	for _, v := range p.victims {
 		switch v.keep {
 		case keepAll:
 		case keepNone:
-			// A target of the search without partial preemption, or a victim that
-			// is already being evicted.
+			// A target of the eviction phase, or a victim that is already being evicted.
 			targets = append(targets, cmp.Or(v.eviction, v.target))
 		default:
 			target := *v.target
@@ -283,16 +540,14 @@ func (p *partialPlan) buildTargets(ctx context.Context) []*Target {
 			targets = append(targets, &target)
 		}
 	}
-	if len(targets) == 0 || !p.strategy.accepts(ctx, targets) {
-		return nil
-	}
 	return targets
 }
 
-// fillBack returns to the victims what the workload does not need, starting
-// with what disrupts them most. Each pass goes over the memorized victims in
-// the reverse order. A victim with a shrink in progress never gets more than
-// that shrink leaves it, unless it is left out altogether.
+// fillBack returns to the victims what the workload does not need, band by
+// band from the highest-priority (last touched) band down to the lowest.
+// Within each band, phases A/B/C run in reverse observation order, starting
+// with what disrupts victims most. Finally, phase D drops unneeded in-progress
+// reductions in reverse order.
 func (p *partialPlan) fillBack(ctx context.Context) {
 	// tryKeep leaves more to the victim if the workload still fits then.
 	tryKeep := func(v *victim, keep int32) bool {
@@ -307,21 +562,33 @@ func (p *partialPlan) fillBack(ctx context.Context) {
 		p.setKeep(v, previous)
 		return false
 	}
-	// A. A victim that the plan evicted and that can shrink keeps its floor.
+	for _, band := range slices.Backward(p.bands) {
+		p.fillBackBand(band, tryKeep)
+	}
+	// D. A victim whose eviction or shrink was already in progress is left out.
 	for _, v := range slices.Backward(p.victims) {
+		if v.keep == v.inProgress() {
+			tryKeep(v, keepAll)
+		}
+	}
+}
+
+func (p *partialPlan) fillBackBand(members []*victim, tryKeep func(*victim, int32) bool) {
+	// A. A victim that the plan evicted and that can shrink keeps its floor.
+	for _, v := range slices.Backward(members) {
 		if v.keep == keepNone && v.canShrink() {
 			tryKeep(v, v.floor())
 		}
 	}
 	// B. A victim that the plan evicted is not evicted.
-	for _, v := range slices.Backward(p.victims) {
+	for _, v := range slices.Backward(members) {
 		if v.keep == keepNone {
 			tryKeep(v, v.inProgress())
 		}
 	}
 	// C. A victim that the plan shrank does not shrink, or else shrinks to the
 	// largest count that still fits.
-	for _, v := range slices.Backward(p.victims) {
+	for _, v := range slices.Backward(members) {
 		inProgress := v.inProgress()
 		if v.keep == keepNone || v.keep >= inProgress || tryKeep(v, inProgress) {
 			continue
@@ -332,12 +599,6 @@ func (p *partialPlan) fillBack(ctx context.Context) {
 			if count := v.keep + (tooMany-v.keep)/2; !tryKeep(v, count) {
 				tooMany = count
 			}
-		}
-	}
-	// D. A victim whose eviction or shrink was already in progress is left out.
-	for _, v := range slices.Backward(p.victims) {
-		if v.keep == v.inProgress() {
-			tryKeep(v, keepAll)
 		}
 	}
 }

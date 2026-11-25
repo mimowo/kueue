@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/component-base/featuregate"
@@ -36,14 +38,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	config "sigs.k8s.io/kueue/apis/config/v1beta2"
+	kueuealpha "sigs.k8s.io/kueue/apis/kueue/v1alpha1"
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/constants"
 	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/resources"
 	"sigs.k8s.io/kueue/pkg/scheduler/flavorassigner"
 	preemptexpectations "sigs.k8s.io/kueue/pkg/scheduler/preemption/expectations"
 	"sigs.k8s.io/kueue/pkg/scheduler/preemption/policy"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
+	utiltestingalpha "sigs.k8s.io/kueue/pkg/util/testing/v1alpha1"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/pkg/workload"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
@@ -111,8 +116,40 @@ type planFixture struct {
 	pristine *schdcache.Snapshot
 }
 
-func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.ClusterQueue, admitted []*kueue.Workload, incoming *kueue.Workload) planFixture {
+type planFixtureOpts struct {
+	cohorts           []*kueue.Cohort
+	enabledAfs        bool
+	afsUsage          map[string]float64
+	preemptionConfigs []client.Object
+}
+
+type planFixtureOption func(*planFixtureOpts)
+
+func withCohorts(cohorts ...*kueue.Cohort) planFixtureOption {
+	return func(o *planFixtureOpts) {
+		o.cohorts = append(o.cohorts, cohorts...)
+	}
+}
+
+func withAFSUsage(usage map[string]float64) planFixtureOption {
+	return func(o *planFixtureOpts) {
+		o.enabledAfs = true
+		o.afsUsage = usage
+	}
+}
+
+func withPreemptionConfigs(configs ...client.Object) planFixtureOption {
+	return func(o *planFixtureOpts) {
+		o.preemptionConfigs = append(o.preemptionConfigs, configs...)
+	}
+}
+
+func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.ClusterQueue, admitted []*kueue.Workload, incoming *kueue.Workload, opts ...planFixtureOption) planFixture {
 	t.Helper()
+	var cfg planFixtureOpts
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	ctx, log := utiltesting.ContextWithLog(t)
 	items := make([]kueue.Workload, len(admitted))
 	for i := range admitted {
@@ -122,15 +159,23 @@ func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.
 			items[i].UID = types.UID(items[i].Name)
 		}
 	}
-	cl := utiltesting.NewClientBuilder().
+	clBuilder := utiltesting.NewClientBuilder().
 		WithLists(&kueue.WorkloadList{Items: items}).
 		WithStatusSubresource(&kueue.Workload{}).
-		WithInterceptorFuncs(interceptor.Funcs{SubResourceApply: utiltesting.TreatSSAAsStrategicMergeForApplyConfiguration}).
-		Build()
+		WithInterceptorFuncs(interceptor.Funcs{SubResourceApply: utiltesting.TreatSSAAsStrategicMergeForApplyConfiguration})
+	if len(cfg.preemptionConfigs) > 0 {
+		clBuilder = clBuilder.WithObjects(cfg.preemptionConfigs...)
+	}
+	cl := clBuilder.Build()
 	// newCache returns a cache of the ClusterQueues, with the admitted
 	// workloads as it lists them from the client.
 	newCache := func() *schdcache.Cache {
 		cqCache := schdcache.New(cl)
+		for _, cohort := range cfg.cohorts {
+			if err := cqCache.AddOrUpdateCohort(cohort); err != nil {
+				t.Fatalf("Couldn't add Cohort %q to cache: %v", cohort.Name, err)
+			}
+		}
 		cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
 		for _, cq := range cqs {
 			if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
@@ -140,7 +185,7 @@ func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.
 		return cqCache
 	}
 	cqCache := newCache()
-	preemptor := New(cl, workload.Ordering{}, &utiltesting.EventRecorder{}, fairSharing, false,
+	preemptor := New(cl, workload.Ordering{}, &utiltesting.EventRecorder{}, fairSharing, cfg.enabledAfs,
 		clocktesting.NewFakeClock(time.Now()), nil, preemptexpectations.New(), nil)
 	snapshot, err := cqCache.Snapshot(ctx)
 	if err != nil {
@@ -152,11 +197,28 @@ func newPlanFixture(t *testing.T, fairSharing *config.FairSharing, cqs []*kueue.
 	if err != nil {
 		t.Fatalf("unexpected error while building snapshot: %v", err)
 	}
+	if len(cfg.afsUsage) > 0 {
+		stampAFS := func(snap *schdcache.Snapshot) {
+			for _, cqSnap := range snap.ClusterQueues() {
+				for key, wl := range cqSnap.Workloads {
+					if usage, ok := cfg.afsUsage[wl.Obj.Name]; ok {
+						wlCopy := *wl
+						wlCopy.LocalQueueFSUsage = new(usage)
+						cqSnap.Workloads[key] = &wlCopy
+					}
+				}
+			}
+		}
+		stampAFS(snapshot)
+		stampAFS(pristine)
+	}
 	wlInfo := workload.NewInfo(log, incoming)
 	wlInfo.ClusterQueue = kueue.ClusterQueueReference(cqs[0].Name)
-	pCtx := preemptor.buildContext(ctx, *wlInfo, singlePodSetAssignment(flavorassigner.ResourceAssignment{
-		corev1.ResourceCPU: &flavorassigner.FlavorAssignment{Name: "default", Mode: flavorassigner.Preempt},
-	}), snapshot)
+	flavors := make(flavorassigner.ResourceAssignment)
+	wlInfo.TotalRequests[0].Requests.ForEach(func(name corev1.ResourceName, _ resources.Amount) {
+		flavors[name] = &flavorassigner.FlavorAssignment{Name: "default", Mode: flavorassigner.Preempt}
+	})
+	pCtx := preemptor.buildContext(ctx, *wlInfo, singlePodSetAssignment(flavors), snapshot)
 	return planFixture{ctx: ctx, client: cl, cache: cqCache, preemptor: preemptor, pCtx: pCtx, pristine: pristine}
 }
 
@@ -1497,4 +1559,702 @@ func partialPreemptionVictim(name string, count, floor int32, retained *int32) *
 		wl.Status.Admission.PodSetAssignments[0].PartialPreemption = &kueue.PodSetPartialPreemptionStatus{RetainedCount: retained}
 	}
 	return wl
+}
+
+func TestPartialPreemptionBands(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	cohortPreempt := kueue.ClusterQueuePreemption{
+		WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+		ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+		BorrowWithinCohort:  &kueue.BorrowWithinCohort{Policy: kueue.BorrowWithinCohortPolicyLowerPriority},
+	}
+
+	makeCQ := func(name, cohort, nominal string, preemption kueue.ClusterQueuePreemption) *kueue.ClusterQueue {
+		b := utiltestingapi.MakeClusterQueue(name).
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, nominal).Obj()).
+			Preemption(preemption)
+		if cohort != "" {
+			b = b.Cohort(kueue.CohortReference(cohort))
+		}
+		return b.Obj()
+	}
+
+	makeVictim := func(name string, cq kueue.ClusterQueueReference, prio, count, floor int32) *kueue.Workload {
+		return utiltestingapi.MakeWorkload(name, "").
+			UID(types.UID(name)).
+			Queue(kueue.LocalQueueName(name)).
+			Annotation(constants.PartialPreemptionAnnotation, "true").
+			Priority(prio).
+			PodSets(*utiltestingapi.MakePodSet("main", int(count)).
+				Request(corev1.ResourceCPU, "1").
+				PartialPreemptionMinRetainedCount(floor).
+				Obj()).
+			SimpleReserveQuota(cq, "default", now).
+			Obj()
+	}
+
+	makePendingVictim := func(name string, cq kueue.ClusterQueueReference, prio, count, floor, retained int32) *kueue.Workload {
+		return utiltestingapi.MakeWorkload(name, "").
+			UID(types.UID(name)).
+			Queue(kueue.LocalQueueName(name)).
+			Annotation(constants.PartialPreemptionAnnotation, "true").
+			Priority(prio).
+			PodSets(*utiltestingapi.MakePodSet("main", int(count)).
+				Request(corev1.ResourceCPU, "1").
+				PartialPreemptionMinRetainedCount(floor).
+				Obj()).
+			ReserveQuotaAt(utiltestingapi.MakeAdmission(cq).
+				PodSets(utiltestingapi.MakePodSetAssignment("main").
+					Assignment(corev1.ResourceCPU, "default", fmt.Sprintf("%d", count)).
+					Count(count).
+					PartialPreemptionRetainedCount(retained).
+					Obj()).
+				Obj(), now).
+			Condition(metav1.Condition{
+				Type:               kueue.WorkloadPartiallyPreempted,
+				Status:             metav1.ConditionTrue,
+				Reason:             kueue.InClusterQueueReason,
+				Message:            "Existing shrink",
+				LastTransitionTime: metav1.NewTime(now),
+			}).
+			Obj()
+	}
+
+	makeFixedVictim := func(name string, cq kueue.ClusterQueueReference, prio, count int32) *kueue.Workload {
+		return utiltestingapi.MakeWorkload(name, "").
+			UID(types.UID(name)).
+			Queue(kueue.LocalQueueName(name)).
+			Priority(prio).
+			PodSets(*utiltestingapi.MakePodSet("main", int(count)).
+				Request(corev1.ResourceCPU, "1").
+				Obj()).
+			SimpleReserveQuota(cq, "default", now).
+			Obj()
+	}
+
+	configName := "fallback-config"
+	configurableRule := utiltestingalpha.MakePreemptionConfig(configName).
+		Rule("fallback", kueuealpha.Always,
+			utiltestingalpha.MakeCandidateSelector(kueuealpha.WithinClusterQueue).Obj(),
+		).Obj()
+
+	cases := map[string]struct {
+		featureGates      map[featuregate.Feature]bool
+		fairSharing       *config.FairSharing
+		cohorts           []*kueue.Cohort
+		afsUsage          map[string]float64
+		preemptionConfigs []client.Object
+		clusterQueues     []*kueue.ClusterQueue
+		admitted          []*kueue.Workload
+		incoming          *kueue.Workload
+		wantTargets       []planTarget
+		skipOracle        bool
+	}{
+		"priority order on: low priority band evicted before high priority band shrinks": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("30")},
+			admitted: []*kueue.Workload{
+				makeVictim("low-01", "standalone", 0, 10, 5),
+				makeVictim("low-02", "standalone", 0, 10, 5),
+				makeVictim("high", "standalone", 500, 10, 5),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(1000).Request(corev1.ResourceCPU, "12").Obj(),
+			wantTargets: []planTarget{evict("low-01"), shrink("low-02", 8)},
+		},
+		"priority order off: all priorities shrink before any eviction": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: false,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("30")},
+			admitted: []*kueue.Workload{
+				makeVictim("low-01", "standalone", 0, 10, 5),
+				makeVictim("low-02", "standalone", 0, 10, 5),
+				makeVictim("high", "standalone", 500, 10, 5),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(1000).Request(corev1.ResourceCPU, "12").Obj(),
+			wantTargets: []planTarget{shrink("low-01", 5), shrink("low-02", 5), shrink("high", 8)},
+		},
+		"priority order on: equal priority peers shrink before any eviction": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "standalone", 0, 10, 5),
+				makeVictim("b", "standalone", 0, 10, 5),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(10).Request(corev1.ResourceCPU, "7").Obj(),
+			wantTargets: []planTarget{shrink("a", 5), shrink("b", 8)},
+		},
+		"priority order on: reverse-band fill-back restores higher band before lower band": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makeVictim("high", "standalone", 10, 10, 0),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "12").Obj(),
+			wantTargets: []planTarget{evict("low"), shrink("high", 8)},
+		},
+		"priority order off: global fill-back restores lower priority before higher priority shrinks": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: false,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makeVictim("high", "standalone", 10, 10, 0),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "12").Obj(),
+			wantTargets: []planTarget{shrink("low", 5), shrink("high", 3)},
+		},
+		"priority order on: multi-resource fill-back restores lower band when higher band covers deficit": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				utiltestingapi.MakeClusterQueue("standalone").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").
+						Resource(corev1.ResourceCPU, "20").
+						Resource(corev1.ResourceMemory, "10Gi").Obj()).
+					Preemption(kueue.ClusterQueuePreemption{WithinClusterQueue: kueue.PreemptionPolicyLowerPriority}).
+					Obj(),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				func() *kueue.Workload {
+					wl := makeVictim("high", "standalone", 10, 10, 0)
+					wl.Spec.PodSets[0].Template.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("1Gi")
+					assign := &wl.Status.Admission.PodSetAssignments[0]
+					assign.ResourceUsage[corev1.ResourceMemory] = resource.MustParse("10Gi")
+					assign.Flavors[corev1.ResourceMemory] = "default"
+					return wl
+				}(),
+			},
+			incoming: utiltestingapi.MakeWorkload("in", "").Priority(30).
+				Request(corev1.ResourceCPU, "2").
+				Request(corev1.ResourceMemory, "4Gi").Obj(),
+			wantTargets: []planTarget{shrink("high", 6)},
+			skipOracle:  true,
+		},
+		"priority order on: pending shrink on high priority covers demand alone": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makePendingVictim("high", "standalone", 10, 10, 0, 7),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "3").Obj(),
+			wantTargets: []planTarget{shrink("high", 7)},
+		},
+		"priority order on: pending shrink on high priority combines with lower band delta": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makePendingVictim("high", "standalone", 10, 10, 0, 7),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "5").Obj(),
+			wantTargets: []planTarget{shrink("high", 7), shrink("low", 8)},
+		},
+		"priority order on: unneeded pending high shrink is dropped when lower eviction covers demand": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("low", "standalone", 0, 10),
+				makePendingVictim("high", "standalone", 10, 10, 0, 7),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "10").Obj(),
+			wantTargets: []planTarget{evict("low")},
+		},
+		"priority order on: pending high shrinks further after lower band is exhausted": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makePendingVictim("high", "standalone", 10, 10, 0, 7),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "15").Obj(),
+			wantTargets: []planTarget{shrink("high", 5), evict("low")},
+		},
+		"priority order on: already evicted high priority covers demand alone": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("14")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 1),
+				beingEvicted(makeFixedVictim("high", "standalone", 10, 4)),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "3").Obj(),
+			wantTargets: []planTarget{evict("high")},
+		},
+		"priority order on: hierarchy segment precedes own-CQ lower priority": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "6", cohortPreempt),
+				makeCQ("q", "coh", "4", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("own-low", "p", 0, 1),
+				makeVictim("other-high", "q", 10, 9, 4),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "3").Obj(),
+			wantTargets: []planTarget{shrink("other-high", 6)},
+		},
+		"priority order on: cross-CQ equal-priority peers share one band": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "6", cohortPreempt),
+				makeCQ("q", "coh", "2", cohortPreempt),
+				makeCQ("r", "coh", "2", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "q", 0, 5, 3),
+				makeVictim("b", "r", 0, 5, 3),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "3").Obj(),
+			wantTargets: []planTarget{shrink("a", 3), shrink("b", 4)},
+		},
+		"priority order on: AFS tier does not chain across another ClusterQueue": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "12", cohortPreempt),
+				makeCQ("q", "coh", "4", cohortPreempt),
+				makeCQ("r", "coh", "2", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "q", 0, 6, 4),
+				makeVictim("b", "r", 0, 6, 4),
+				makeVictim("c", "q", 0, 6, 4),
+			},
+			afsUsage: map[string]float64{"a": 100, "b": 30, "c": 1},
+			// Band 1 holds {a, b} (total shrink = 4 < 6), so a is evicted (6 freed,
+			// bringing q from 12 to 6 > 4) before c (lower AFS tier in q) is touched.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "6").Obj(),
+			wantTargets: []planTarget{evict("a")},
+		},
+		"priority order on: ancestor cohort within nominal stops reclamation": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("branch").Parent("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "8").Obj()).Obj(),
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "4", cohortPreempt),
+				makeCQ("q", "branch", "0", cohortPreempt),
+				makeCQ("r", "branch", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "q", 0, 6, 1),
+				makeVictim("b", "r", 0, 6, 1),
+			},
+			// Shrinking a to 1 drops branch from 12 to 7 <= 8 (nominal), so b is never touched.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "5").Obj(),
+			wantTargets: []planTarget{shrink("a", 1)},
+		},
+		"priority order on: configurable preemptions form trailing eviction-only band": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+				features.ConfigurablePreemptions:        true,
+			},
+			preemptionConfigs: []client.Object{configurableRule},
+			clusterQueues: []*kueue.ClusterQueue{
+				utiltestingapi.MakeClusterQueue("standalone").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "10").Obj()).
+					Preemption(kueue.ClusterQueuePreemption{WithinClusterQueue: kueue.PreemptionPolicyLowerPriority}).
+					Annotation(kueuealpha.PreemptionConfigNameAnnotation, configName).
+					Obj(),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 5, 1),
+				// Higher priority than incoming (10), so only PreemptionConfig can select it.
+				makeVictim("peer-high", "standalone", 20, 5, 1),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(10).Request(corev1.ResourceCPU, "8").Obj(),
+			wantTargets: []planTarget{shrink("low", 2), evict("peer-high")},
+		},
+		"priority order on: fair sharing remains single band": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			fairSharing:   &config.FairSharing{},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("20")},
+			admitted: []*kueue.Workload{
+				makeVictim("low", "standalone", 0, 10, 5),
+				makeVictim("high", "standalone", 10, 10, 5),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "8").Obj(),
+			wantTargets: []planTarget{shrink("low", 5), shrink("high", 7)},
+		},
+		"priority order on: no fit restores snapshot": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("10")},
+			admitted:      []*kueue.Workload{makeVictim("a", "standalone", 0, 10, 3)},
+			incoming:      utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "11").Obj(),
+		},
+		// Queue A2 uses 10 CPUs with a nominal quota of 5, and B2 uses 4 with a
+		// nominal quota of 3. 2 of the 16 CPUs are free, so the workload needs 11
+		// more. Shrinking a2 and b2 to their floors frees 6 and leaves both queues
+		// at nominal. The evictions are chosen without the shrinks: a2 is
+		// evicted, and b2 stays at its floor.
+		"priority order off: an eviction is added to shrinks that leave the ClusterQueues at nominal": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("P2", "coh2", "8", cohortPreempt),
+				utiltestingapi.MakeClusterQueue("A2").
+					Cohort("coh2").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "5", "20").Obj()).
+					Obj(),
+				utiltestingapi.MakeClusterQueue("B2").
+					Cohort("coh2").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "3", "20").Obj()).
+					Obj(),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a2", "A2", 0, 10, 5),
+				makeVictim("b2", "B2", 0, 4, 3),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(10).Request(corev1.ResourceCPU, "13").Obj(),
+			wantTargets: []planTarget{evict("a2"), shrink("b2", 3)},
+		},
+		"priority order on: an eviction is added to shrinks that leave the ClusterQueues at nominal": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("P2", "coh2", "8", cohortPreempt),
+				utiltestingapi.MakeClusterQueue("A2").
+					Cohort("coh2").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "5", "20").Obj()).
+					Obj(),
+				utiltestingapi.MakeClusterQueue("B2").
+					Cohort("coh2").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "3", "20").Obj()).
+					Obj(),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a2", "A2", 0, 10, 5),
+				makeVictim("b2", "B2", 0, 4, 3),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(10).Request(corev1.ResourceCPU, "13").Obj(),
+			wantTargets: []planTarget{evict("a2"), shrink("b2", 3)},
+		},
+		"priority order off: a peer of a ClusterQueue that shrank to nominal is still evicted": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("P", "coh1", "8", kueue.ClusterQueuePreemption{ReclaimWithinCohort: kueue.PreemptionPolicyAny}),
+				makeCQ("A", "coh1", "2", kueue.ClusterQueuePreemption{}),
+				makeCQ("B", "coh1", "0", kueue.ClusterQueuePreemption{}),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a1", "A", 0, 4, 2),
+				makeVictim("b1", "B", 0, 4, 3),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(0).Request(corev1.ResourceCPU, "7").Obj(),
+			wantTargets: []planTarget{evict("a1"), shrink("b1", 3)},
+		},
+		"priority order on: an eviction brings a ClusterQueue within nominal and protects its peer": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "4", cohortPreempt),
+				makeCQ("q", "coh", "4", cohortPreempt),
+				makeCQ("r", "coh", "2", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "q", 0, 3, 2),
+				makeVictim("b", "q", 0, 3, 2),
+				makeVictim("c", "r", 5, 4, 2),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "4").Obj(),
+			wantTargets: []planTarget{evict("a"), shrink("c", 3)},
+		},
+		"priority order on: a peer is not shrunk once an eviction brings its ClusterQueue within nominal": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "5", cohortPreempt),
+				makeCQ("q", "coh", "4", cohortPreempt),
+				makeCQ("r", "coh", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "q", 0, 3, 2),
+				makeVictim("b", "q", 0, 3, 2),
+				makeFixedVictim("c", "r", 0, 1),
+			},
+			// Free quota is 2; demand 6 needs 4. Evicting a drops q from 6 to 3 <= 4
+			// (nominal), so b must not be shrunk on top of a's eviction; c is evicted instead.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "6").Obj(),
+			wantTargets: []planTarget{evict("a"), evict("c")},
+		},
+		"priority order on: an eviction that the workload does not need is dropped": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{partialPreemptionClusterQueue("16")},
+			admitted: []*kueue.Workload{
+				makeVictim("a", "standalone", 0, 6, 3),
+				makeVictim("b", "standalone", 0, 8, 6),
+			},
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(10).Request(corev1.ResourceCPU, "9").Obj(),
+			wantTargets: []planTarget{evict("b")},
+		},
+		"priority order on: the eviction walk finds a sibling ClusterQueue that the shrinks had protected": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("branch").Parent("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "1").Obj()).Obj(),
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "6", cohortPreempt),
+				makeCQ("q1", "branch", "5", cohortPreempt),
+				makeCQ("q2", "branch", "4", cohortPreempt),
+				makeCQ("other", "coh", "3", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a1", "q1", 0, 3, 2),
+				makeVictim("a2", "q1", 0, 5, 2),
+				makeFixedVictim("b1", "q2", 0, 4),
+				makeFixedVictim("b2", "q2", 10, 2),
+				makeFixedVictim("z", "other", 10, 4),
+			},
+			// Total nominal for branch is 1+5+4=10, usage is 8+6=14; total free in coh is 1.
+			// During shrinkBand, shrinking a1 (3->2) and a2 (5->2) brings branch to 10 (nominal),
+			// pruning q2 (b1). When evictBand reverts a1/a2 and evicts a1 (q1 drops to 5 == nominal,
+			// skipping a2), branch is still at 11 > 10 so the restarted eviction walk finds b1
+			// in the same band without touching higher-priority z.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "6").Obj(),
+			wantTargets: []planTarget{shrink("a1", 2), evict("b1")},
+		},
+		"priority order on: evictions return the shrinks that they leave ineligible in their ClusterQueue": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "10", cohortPreempt),
+				makeCQ("q", "coh", "14", cohortPreempt),
+				makeCQ("r", "coh", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("a1", "q", 0, 4),
+				makeFixedVictim("a2", "q", 0, 4),
+				makeVictim("b", "q", 0, 4, 2),
+				makeVictim("c", "q", 0, 4, 2),
+				makeVictim("d", "q", 0, 4, 2),
+				makeFixedVictim("x", "r", 0, 4),
+			},
+			// The workload needs the 10 CPUs that q and r borrow. Shrinking b, c
+			// and d frees 6 and leaves q at nominal. With a1 evicted, q is at
+			// nominal with the shrink of b alone, and with a2 evicted too, without
+			// any shrink. So x is evicted as well, and q keeps its nominal quota.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "10").Obj(),
+			wantTargets: []planTarget{evict("a1"), evict("a2"), evict("x")},
+		},
+		"priority order on: an eviction keeps the shrinks that stay eligible in its ClusterQueue": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "12", cohortPreempt),
+				makeCQ("q", "coh", "8", cohortPreempt),
+				makeCQ("r", "coh", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeVictim("a1", "q", 0, 6, 5),
+				makeFixedVictim("a2", "r", 0, 4),
+				makeVictim("b", "q", 0, 4, 2),
+				makeVictim("c", "q", 0, 4, 2),
+				makeVictim("d", "q", 0, 2, 1),
+			},
+			// The workload needs 8 CPUs. Shrinking a1, b, c and d frees 6 and
+			// leaves q above nominal. With a1 evicted, the shrink of b brings q to
+			// nominal, so b stays shrunk while c and d keep their Pods.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "8").Obj(),
+			wantTargets: []planTarget{evict("a1"), shrink("b", 2)},
+		},
+		"priority order on: an eviction lets a peer in a sibling ClusterQueue shrink": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("branch").Parent("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "4").Obj()).Obj(),
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "4", cohortPreempt),
+				makeCQ("q1", "branch", "6", cohortPreempt),
+				makeCQ("q2", "branch", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("a", "q1", 0, 2),
+				makeVictim("b", "q1", 0, 6, 1),
+				makeVictim("c", "q2", 0, 6, 1),
+			},
+			// branch uses 14 CPUs with a nominal quota of 10, and the workload
+			// needs 7. Shrinking b frees 5 and leaves branch within nominal, which
+			// protects c. With a evicted, q1 is at nominal, so b does not shrink.
+			// That leaves branch above nominal, so c shrinks instead.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "7").Obj(),
+			wantTargets: []planTarget{evict("a"), shrink("c", 1)},
+		},
+		"priority order on: an eviction returns the shrink in its ClusterQueue while a later shrink in a sibling stands": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("branch").Parent("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "2").Obj()).Obj(),
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "9", cohortPreempt),
+				makeCQ("q1", "branch", "6", cohortPreempt),
+				makeCQ("q2", "branch", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("a", "q1", 0, 2),
+				makeVictim("b", "q1", 0, 6, 1),
+				makeVictim("c", "q2", 0, 9, 6),
+			},
+			// branch uses 17 CPUs with a nominal quota of 8, and the workload
+			// needs 10. Shrinking b and c frees 8. With a evicted, q1 is at
+			// nominal, so b does not shrink although c still does. That frees 5,
+			// so c is evicted too.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "10").Obj(),
+			wantTargets: []planTarget{evict("a"), evict("c")},
+		},
+		"priority order on: a shrink in a sibling ClusterQueue stands after one eviction and is returned after the next": {
+			featureGates: map[featuregate.Feature]bool{
+				features.PartialPreemption:              true,
+				features.PartialPreemptionPriorityOrder: true,
+			},
+			cohorts: []*kueue.Cohort{
+				utiltestingapi.MakeCohort("branch").Parent("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas("default").Resource(corev1.ResourceCPU, "6").Obj()).Obj(),
+			},
+			clusterQueues: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "8", cohortPreempt),
+				makeCQ("q1", "branch", "0", cohortPreempt),
+				makeCQ("q2", "branch", "0", cohortPreempt),
+				makeCQ("r", "coh", "0", cohortPreempt),
+			},
+			admitted: []*kueue.Workload{
+				makeFixedVictim("a1", "q1", 0, 2),
+				makeFixedVictim("a2", "q1", 0, 2),
+				makeVictim("b", "q2", 0, 6, 1),
+				makeFixedVictim("x", "r", 0, 4),
+			},
+			// branch uses 10 CPUs with a nominal quota of 6, and the workload
+			// needs the 8 CPUs that branch and r borrow. With a1 evicted, branch
+			// is still above nominal, so b shrinks, which frees 7 in total. With
+			// a2 evicted too, branch is at nominal, so b keeps its Pods and x is
+			// evicted.
+			incoming:    utiltestingapi.MakeWorkload("in", "").Priority(100).Request(corev1.ResourceCPU, "8").Obj(),
+			wantTargets: []planTarget{evict("a1"), evict("a2"), evict("x")},
+		},
+	}
+
+	for _, cacheEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cacheEnabled), func(t *testing.T) {
+			for name, tc := range cases {
+				t.Run(name, func(t *testing.T) {
+					gates := map[featuregate.Feature]bool{
+						features.ClassicalPreemptionCandidateOrderCache: cacheEnabled,
+					}
+					maps.Copy(gates, tc.featureGates)
+					features.SetFeatureGatesDuringTest(t, gates)
+
+					var opts []planFixtureOption
+					if len(tc.cohorts) > 0 {
+						opts = append(opts, withCohorts(tc.cohorts...))
+					}
+					if len(tc.afsUsage) > 0 {
+						opts = append(opts, withAFSUsage(tc.afsUsage))
+					}
+					if len(tc.preemptionConfigs) > 0 {
+						opts = append(opts, withPreemptionConfigs(tc.preemptionConfigs...))
+					}
+					fixture := newPlanFixture(t, tc.fairSharing, tc.clusterQueues, tc.admitted, tc.incoming, opts...)
+
+					targets := fixture.search(t, fixture.preemptor.getPreemptionStrategyIterator(fixture.ctx, fixture.pCtx))
+					if diff := cmp.Diff(tc.wantTargets, planTargets(t, targets), planTargetCmpOpts); diff != "" {
+						t.Errorf("Unexpected targets (-want,+got):\n%s", diff)
+					}
+
+					if !tc.skipOracle {
+						fr := resources.FlavorResource{Flavor: "default", Resource: corev1.ResourceCPU}
+						qty := fixture.pCtx.requestedQuota[fr]
+						pos, _ := NewOracle(fixture.preemptor, fixture.pCtx.snapshot).SimulatePreemption(
+							fixture.ctx, fixture.pCtx.preemptorCQ, fixture.pCtx.preemptor, fr, qty,
+						)
+						if (pos == policy.NoCandidates) != (len(tc.wantTargets) == 0) {
+							t.Errorf("PreemptionOracle returned %v, want targets %v", pos, tc.wantTargets)
+						}
+						if diff := cmp.Diff(fixture.pristine, fixture.pCtx.snapshot, snapCmpOpts); diff != "" {
+							t.Errorf("PreemptionOracle changed the snapshot (-before,+after):\n%s", diff)
+						}
+					}
+
+					fixture.issue(t, targets)
+				})
+			}
+		})
+	}
 }

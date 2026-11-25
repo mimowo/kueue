@@ -17,15 +17,25 @@ limitations under the License.
 package classical
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
+	"sigs.k8s.io/kueue/pkg/constants"
+	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/resources"
+	"sigs.k8s.io/kueue/pkg/scheduler/preemption/policy"
 	utiltesting "sigs.k8s.io/kueue/pkg/util/testing"
 	utiltestingapi "sigs.k8s.io/kueue/pkg/util/testing/v1beta2"
 	"sigs.k8s.io/kueue/pkg/workload"
@@ -394,6 +404,422 @@ func TestBuildBuckets(t *testing.T) {
 			}
 			if !slices.Equal(gotCQs, tc.wantNonEvictedCQs) {
 				t.Errorf("non-evicted bucket CQs = %v, want %v", gotCQs, tc.wantNonEvictedCQs)
+			}
+		})
+	}
+}
+
+func TestCandidateIteratorBands(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	frs := sets.New(resources.FlavorResource{Flavor: testFlavor, Resource: corev1.ResourceCPU})
+
+	makeCQ := func(name, cohort, nominal string, preemption kueue.ClusterQueuePreemption) *kueue.ClusterQueue {
+		b := utiltestingapi.MakeClusterQueue(name).
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas(testFlavor).Resource(corev1.ResourceCPU, nominal).Obj()).
+			Preemption(preemption)
+		if cohort != "" {
+			b = b.Cohort(kueue.CohortReference(cohort))
+		}
+		return b.Obj()
+	}
+
+	makeWl := func(name, cq string, prio int32, cpus string) *kueue.Workload {
+		return utiltestingapi.MakeWorkload(name, "ns").
+			UID(types.UID(name)).
+			Queue(kueue.LocalQueueName(name)).
+			Priority(prio).
+			Request(corev1.ResourceCPU, cpus).
+			SimpleReserveQuota(kueue.ClusterQueueReference(cq), testFlavor, now).
+			Obj()
+	}
+
+	cohortPreempt := kueue.ClusterQueuePreemption{
+		WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+		ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+		BorrowWithinCohort:  &kueue.BorrowWithinCohort{Policy: kueue.BorrowWithinCohortPolicyLowerPriority},
+	}
+
+	cases := map[string]struct {
+		cqs          []*kueue.ClusterQueue
+		workloads    []*kueue.Workload
+		enabledAfs   bool
+		afsUsage     map[string]float64
+		preemptorCQ  kueue.ClusterQueueReference
+		preemptorCPU string
+		borrow       bool
+		wantBands    [][]string
+	}{
+		"segments and priority tiers": {
+			cqs: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "4", cohortPreempt),
+				makeCQ("q", "coh", "2", cohortPreempt),
+			},
+			workloads: []*kueue.Workload{
+				makeWl("own-low", "p", 0, "1"),
+				makeWl("own-high", "p", 10, "1"),
+				makeWl("other-low", "q", 0, "2"),
+				makeWl("other-high", "q", 10, "2"),
+				func() *kueue.Workload {
+					wl := makeWl("other-evicted", "q", 20, "1")
+					wl.Status.Conditions = append(wl.Status.Conditions, metav1.Condition{
+						Type:               kueue.WorkloadEvicted,
+						Status:             metav1.ConditionTrue,
+						Reason:             "Preempted",
+						LastTransitionTime: metav1.NewTime(now),
+					})
+					return wl
+				}(),
+			},
+			preemptorCQ:  "p",
+			preemptorCPU: "2",
+			borrow:       true,
+			wantBands: [][]string{
+				{"other-evicted"},
+				{"other-low"},
+				{"other-high"},
+				{"own-low"},
+				{"own-high"},
+			},
+		},
+		"cross-CQ equal-priority peers share one band": {
+			cqs: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "6", cohortPreempt),
+				makeCQ("q", "coh", "2", cohortPreempt),
+				makeCQ("r", "coh", "2", cohortPreempt),
+			},
+			workloads: []*kueue.Workload{
+				makeWl("a", "q", 0, "4"),
+				makeWl("b", "r", 0, "4"),
+				makeWl("c", "q", 5, "1"),
+			},
+			preemptorCQ:  "p",
+			preemptorCPU: "4",
+			borrow:       true,
+			wantBands: [][]string{
+				{"a", "b"},
+				{"c"},
+			},
+		},
+		"AFS tiers do not chain across another ClusterQueue": {
+			cqs: []*kueue.ClusterQueue{
+				makeCQ("p", "coh", "10", cohortPreempt),
+				makeCQ("q", "coh", "2", cohortPreempt),
+				makeCQ("r", "coh", "2", cohortPreempt),
+			},
+			workloads: []*kueue.Workload{
+				makeWl("a", "q", 0, "4"),
+				makeWl("b", "r", 0, "4"),
+				makeWl("c", "q", 0, "4"),
+			},
+			enabledAfs:   true,
+			afsUsage:     map[string]float64{"a": 100, "b": 30, "c": 1},
+			preemptorCQ:  "p",
+			preemptorCPU: "4",
+			borrow:       true,
+			wantBands: [][]string{
+				{"a", "b"},
+				{"c"},
+			},
+		},
+	}
+
+	for _, cacheEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cacheEnabled), func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
+			features.SetFeatureGateDuringTest(t, features.ClassicalPreemptionCandidateOrderCache, cacheEnabled)
+			for name, tc := range cases {
+				t.Run(name, func(t *testing.T) {
+					ctx, log := utiltesting.ContextWithLog(t)
+					items := make([]kueue.Workload, len(tc.workloads))
+					for i, wl := range tc.workloads {
+						items[i] = *wl
+					}
+					cl := utiltesting.NewClientBuilder().WithLists(&kueue.WorkloadList{Items: items}).Build()
+					cqCache := schdcache.New(cl)
+					cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor(testFlavor).Obj())
+					for _, cq := range tc.cqs {
+						if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
+							t.Fatalf("AddClusterQueue(%q): %v", cq.Name, err)
+						}
+					}
+					snap, err := cqCache.Snapshot(ctx)
+					if err != nil {
+						t.Fatalf("Snapshot: %v", err)
+					}
+					for _, cqSnap := range snap.ClusterQueues() {
+						for key, wl := range cqSnap.Workloads {
+							if usage, ok := tc.afsUsage[wl.Obj.Name]; ok {
+								wlCopy := *wl
+								wlCopy.LocalQueueFSUsage = new(usage)
+								cqSnap.Workloads[key] = &wlCopy
+							}
+						}
+					}
+
+					preemptorWl := utiltestingapi.MakeWorkload("in", "ns").Priority(100).Request(corev1.ResourceCPU, tc.preemptorCPU).Obj()
+					preemptorInfo := workload.NewInfo(log, preemptorWl)
+					hCtx := &HierarchicalPreemptionCtx{
+						Log:               log,
+						Wl:                preemptorWl,
+						Cq:                snap.ClusterQueue(tc.preemptorCQ),
+						FrsNeedPreemption: frs,
+						Requests: resources.FlavorResourceQuantities{
+							{Flavor: testFlavor, Resource: corev1.ResourceCPU}: preemptorInfo.TotalRequests[0].Requests.ResourceValue(corev1.ResourceCPU),
+						},
+					}
+					clk := clocktesting.NewFakeClock(now)
+					it := NewCandidateIterator(hCtx, tc.enabledAfs, frs, snap, clk, policy.CandidatesOrdering)
+
+					var gotBands [][]string
+					for band := range it.Bands(tc.borrow) {
+						var names []string
+						for wl := range band.Candidates {
+							names = append(names, wl.Obj.Name)
+						}
+						gotBands = append(gotBands, names)
+					}
+					if diff := cmp.Diff(tc.wantBands, gotBands); diff != "" {
+						t.Errorf("Bands() (-want,+got):\n%s", diff)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCandidateIteratorBandLiveEligibilityAndInProgress(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	frs := sets.New(resources.FlavorResource{Flavor: testFlavor, Resource: corev1.ResourceCPU})
+	cohortPreempt := kueue.ClusterQueuePreemption{
+		WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+		ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+		BorrowWithinCohort:  &kueue.BorrowWithinCohort{Policy: kueue.BorrowWithinCohortPolicyLowerPriority},
+	}
+
+	for _, cacheEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cacheEnabled), func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.PartialPreemption, true)
+			features.SetFeatureGateDuringTest(t, features.ClassicalPreemptionCandidateOrderCache, cacheEnabled)
+			ctx, log := utiltesting.ContextWithLog(t)
+
+			a := utiltestingapi.MakeWorkload("a", "ns").
+				UID("a").
+				Priority(0).
+				Annotation(constants.PartialPreemptionAnnotation, "true").
+				PodSets(*utiltestingapi.MakePodSet("main", 3).Request(corev1.ResourceCPU, "1").PartialPreemptionMinRetainedCount(1).Obj()).
+				SimpleReserveQuota("q", testFlavor, now).
+				Obj()
+			b := utiltestingapi.MakeWorkload("b", "ns").
+				UID("b").
+				Priority(0).
+				Annotation(constants.PartialPreemptionAnnotation, "true").
+				PodSets(*utiltestingapi.MakePodSet("main", 3).Request(corev1.ResourceCPU, "1").PartialPreemptionMinRetainedCount(1).Obj()).
+				SimpleReserveQuota("q", testFlavor, now).
+				Obj()
+			pendingHigh := utiltestingapi.MakeWorkload("pending-high", "ns").
+				UID("pending-high").
+				Priority(20).
+				Annotation(constants.PartialPreemptionAnnotation, "true").
+				PodSets(*utiltestingapi.MakePodSet("main", 4).Request(corev1.ResourceCPU, "1").PartialPreemptionMinRetainedCount(1).Obj()).
+				ReserveQuotaAt(utiltestingapi.MakeAdmission("p").
+					PodSets(utiltestingapi.MakePodSetAssignment("main").
+						Assignment(corev1.ResourceCPU, testFlavor, "4").
+						Count(4).
+						PartialPreemptionRetainedCount(2).
+						Obj()).
+					Obj(), now).
+				Obj()
+			evictedHigh := utiltestingapi.MakeWorkload("evicted-high", "ns").
+				UID("evicted-high").
+				Priority(30).
+				Request(corev1.ResourceCPU, "1").
+				SimpleReserveQuota("p", testFlavor, now).
+				EvictedAt(now).
+				Obj()
+
+			cqs := []*kueue.ClusterQueue{
+				utiltestingapi.MakeClusterQueue("p").Cohort("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas(testFlavor).Resource(corev1.ResourceCPU, "6").Obj()).
+					Preemption(cohortPreempt).Obj(),
+				utiltestingapi.MakeClusterQueue("q").Cohort("coh").
+					ResourceGroup(*utiltestingapi.MakeFlavorQuotas(testFlavor).Resource(corev1.ResourceCPU, "4").Obj()).
+					Preemption(cohortPreempt).Obj(),
+			}
+			cl := utiltesting.NewClientBuilder().WithLists(&kueue.WorkloadList{Items: []kueue.Workload{*a, *b, *pendingHigh, *evictedHigh}}).Build()
+			cqCache := schdcache.New(cl)
+			cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor(testFlavor).Obj())
+			for _, cq := range cqs {
+				if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
+					t.Fatalf("AddClusterQueue(%q): %v", cq.Name, err)
+				}
+			}
+			snap, err := cqCache.Snapshot(ctx)
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+
+			preemptorWl := utiltestingapi.MakeWorkload("in", "ns").Priority(100).Request(corev1.ResourceCPU, "4").Obj()
+			preemptorInfo := workload.NewInfo(log, preemptorWl)
+			hCtx := &HierarchicalPreemptionCtx{
+				Log:               log,
+				Wl:                preemptorWl,
+				Cq:                snap.ClusterQueue("p"),
+				FrsNeedPreemption: frs,
+				Requests: resources.FlavorResourceQuantities{
+					{Flavor: testFlavor, Resource: corev1.ResourceCPU}: preemptorInfo.TotalRequests[0].Requests.ResourceValue(corev1.ResourceCPU),
+				},
+			}
+			clk := clocktesting.NewFakeClock(now)
+			it := NewCandidateIterator(hCtx, false, frs, snap, clk, policy.CandidatesOrdering)
+
+			// InProgressCandidates yields the workload that is being evicted before
+			// the one that is shrinking.
+			var gotInProg []string
+			for wl := range it.InProgressCandidates(true) {
+				gotInProg = append(gotInProg, wl.Obj.Name)
+			}
+			if diff := cmp.Diff([]string{"evicted-high", "pending-high"}, gotInProg); diff != "" {
+				t.Errorf("InProgressCandidates() (-want,+got):\n%s", diff)
+			}
+
+			// The band {a, b} is in ClusterQueue q (nominal 4, usage 6). Removing a
+			// during a walk of Candidates brings q to 3 <= 4, which protects b.
+			// Once a is back, the next walk has to start the band over and offer
+			// both a and b, and it has to stop offering b once a is removed.
+			var checkedBand bool
+			for band := range it.Bands(true) {
+				var shrinkNames []string
+				var aInfo *workload.Info
+				for wl := range band.Candidates {
+					shrinkNames = append(shrinkNames, wl.Obj.Name)
+					if wl.Obj.Name == "a" {
+						aInfo = wl
+						snap.RemoveWorkload(wl)
+					}
+				}
+				if aInfo == nil {
+					continue
+				}
+				checkedBand = true
+				if diff := cmp.Diff([]string{"a"}, shrinkNames); diff != "" {
+					t.Errorf("Candidates while a is removed (-want,+got):\n%s", diff)
+				}
+				snap.AddWorkload(aInfo)
+				var rewindNames []string
+				var bInfo *workload.Info
+				for wl := range band.Candidates {
+					rewindNames = append(rewindNames, wl.Obj.Name)
+					if wl.Obj.Name == "b" {
+						bInfo = wl
+					}
+				}
+				if diff := cmp.Diff([]string{"a", "b"}, rewindNames); diff != "" {
+					t.Errorf("Candidates after restoring a (-want,+got):\n%s", diff)
+				}
+				var evictNames []string
+				for wl := range band.Candidates {
+					evictNames = append(evictNames, wl.Obj.Name)
+					snap.RemoveWorkload(wl)
+				}
+				if diff := cmp.Diff([]string{"a"}, evictNames); diff != "" {
+					t.Errorf("Candidates while evicting a (-want,+got):\n%s", diff)
+				}
+				if bInfo == nil || band.IsEligible(bInfo) {
+					t.Errorf("IsEligible(b) = true after CQ q dropped within nominal, want false")
+				}
+				break
+			}
+			if !checkedBand {
+				t.Fatalf("did not encounter expected {a, b} band")
+			}
+		})
+	}
+}
+
+func TestCandidateIteratorBandEligibilityScope(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	frs := sets.New(resources.FlavorResource{Flavor: testFlavor, Resource: corev1.ResourceCPU})
+	makeCQ := func(name, cohort, nominal string) *kueue.ClusterQueue {
+		return utiltestingapi.MakeClusterQueue(name).
+			Cohort(kueue.CohortReference(cohort)).
+			ResourceGroup(*utiltestingapi.MakeFlavorQuotas(testFlavor).Resource(corev1.ResourceCPU, nominal).Obj()).
+			Preemption(kueue.ClusterQueuePreemption{
+				WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
+				ReclaimWithinCohort: kueue.PreemptionPolicyAny,
+			}).
+			Obj()
+	}
+	makeWl := func(name, cq string) kueue.Workload {
+		return *utiltestingapi.MakeWorkload(name, "ns").
+			UID(types.UID(name)).
+			Priority(0).
+			Request(corev1.ResourceCPU, "1").
+			SimpleReserveQuota(kueue.ClusterQueueReference(cq), testFlavor, now).
+			Obj()
+	}
+
+	for _, cacheEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cacheEnabled), func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.ClassicalPreemptionCandidateOrderCache, cacheEnabled)
+			ctx, log := utiltesting.ContextWithLog(t)
+
+			// ClusterQueues q1 and q2 are in the cohort "branch". The cohort "root"
+			// holds "branch", the preempting ClusterQueue p and ClusterQueue r.
+			workloads := []kueue.Workload{makeWl("own", "p"), makeWl("a", "q1"), makeWl("b", "q2"), makeWl("c", "r")}
+			cl := utiltesting.NewClientBuilder().WithLists(&kueue.WorkloadList{Items: workloads}).Build()
+			cqCache := schdcache.New(cl)
+			cqCache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor(testFlavor).Obj())
+			if err := cqCache.AddOrUpdateCohort(utiltestingapi.MakeCohort("branch").Parent("root").Obj()); err != nil {
+				t.Fatalf("AddOrUpdateCohort: %v", err)
+			}
+			for _, cq := range []*kueue.ClusterQueue{
+				makeCQ("p", "root", "5"),
+				makeCQ("q1", "branch", "0"),
+				makeCQ("q2", "branch", "0"),
+				makeCQ("r", "root", "0"),
+			} {
+				if err := cqCache.AddClusterQueue(ctx, cq); err != nil {
+					t.Fatalf("AddClusterQueue(%q): %v", cq.Name, err)
+				}
+			}
+			snap, err := cqCache.Snapshot(ctx)
+			if err != nil {
+				t.Fatalf("Snapshot: %v", err)
+			}
+
+			preemptorWl := utiltestingapi.MakeWorkload("in", "ns").Priority(100).Request(corev1.ResourceCPU, "5").Obj()
+			hCtx := &HierarchicalPreemptionCtx{
+				Log:               log,
+				Wl:                preemptorWl,
+				Cq:                snap.ClusterQueue("p"),
+				FrsNeedPreemption: frs,
+				Requests: resources.FlavorResourceQuantities{
+					{Flavor: testFlavor, Resource: corev1.ResourceCPU}: workload.NewInfo(log, preemptorWl).TotalRequests[0].Requests.ResourceValue(corev1.ResourceCPU),
+				},
+			}
+			it := NewCandidateIterator(hCtx, false, frs, snap, clocktesting.NewFakeClock(now), policy.CandidatesOrdering)
+
+			gotScopes := make(map[string]string)
+			for band := range it.Bands(false) {
+				for wl := range band.Candidates {
+					switch scope := band.EligibilityScope(wl).(type) {
+					case nil:
+						gotScopes[wl.Obj.Name] = ""
+					case *schdcache.ClusterQueueSnapshot:
+						gotScopes[wl.Obj.Name] = "ClusterQueue " + string(scope.Name)
+					case *schdcache.CohortSnapshot:
+						gotScopes[wl.Obj.Name] = "Cohort " + string(scope.Name)
+					}
+				}
+			}
+			wantScopes := map[string]string{
+				"own": "",
+				"a":   "Cohort branch",
+				"b":   "Cohort branch",
+				"c":   "ClusterQueue r",
+			}
+			if diff := cmp.Diff(wantScopes, gotScopes); diff != "" {
+				t.Errorf("EligibilityScope() by candidate (-want,+got):\n%s", diff)
 			}
 		})
 	}

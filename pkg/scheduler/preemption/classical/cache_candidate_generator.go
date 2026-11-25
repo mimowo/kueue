@@ -17,6 +17,8 @@ limitations under the License.
 package classical
 
 import (
+	"iter"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -42,6 +44,7 @@ type cacheCandidateIterator struct {
 	segments     [numSegments][]*bucket
 	segmentIndex int
 	cmp          schdcache.CandidateOrderComparator
+	enabledAfs   bool
 
 	frsNeedPreemption                 sets.Set[resources.FlavorResource]
 	noCandidateFromOtherQueues        bool
@@ -174,6 +177,7 @@ func newCacheCandidateIterator(
 			nonEvictedHierarchy, nonEvictedPriority, nonEvictedSameQueue,
 		},
 		cmp:                               cmp,
+		enabledAfs:                        enabledAfs,
 		frsNeedPreemption:                 frsNeedPreemption,
 		noCandidateFromOtherQueues:        noHierarchyCandidate && noRealCandidate(hierarchicalReclaimCtx, priorityClasses),
 		noCandidateForHierarchicalReclaim: noHierarchyCandidate,
@@ -191,15 +195,97 @@ func (c *cacheCandidateIterator) Next(borrow bool) (*workload.Info, string) {
 	return nil, ""
 }
 
-// nextFromSegment returns the next valid candidate from a single segment, merging
-// the segment's per-CQ buckets on the fly. It selects the current minimum bucket
-// head by CandidatesOrdering, scanning the buckets on each pop.
+func (c *cacheCandidateIterator) Bands(borrow bool) iter.Seq[Band] {
+	return iterBands(c, c.hierarchicalReclaimCtx.Log, c.enabledAfs, c.frsNeedPreemption, borrow)
+}
+
+func (c *cacheCandidateIterator) InProgressCandidates(borrow bool) iter.Seq2[*workload.Info, string] {
+	return func(yield func(*workload.Info, string) bool) {
+		for segIdx := range numSegments {
+			var pending []bandMember
+			for _, b := range c.segments[segIdx] {
+				for _, wl := range b.sortedWorkloads {
+					if !hasInProgressPreemption(wl.Obj) {
+						continue
+					}
+					variant := classifyPreemptionVariant(c.hierarchicalReclaimCtx, wl, b.hasHierarchicalAdvantage)
+					if variant == Never || (borrow && variant == ReclaimWithoutBorrowing) {
+						continue
+					}
+					pending = append(pending, bandMember{
+						wl:          wl,
+						reason:      variant.PreemptionReason(),
+						segment:     segIdx,
+						cq:          b.cq,
+						lca:         b.lca,
+						isSameQueue: b.isSameQueue,
+					})
+				}
+			}
+			slices.SortFunc(pending, func(x, y bandMember) int {
+				return c.cmp(x.wl, y.wl)
+			})
+			for _, m := range pending {
+				if !m.isEligible(c.frsNeedPreemption) {
+					continue
+				}
+				if !yield(m.wl, m.reason) {
+					return
+				}
+			}
+		}
+	}
+}
+
+func (c *cacheCandidateIterator) save() func() {
+	savedSegment := c.segmentIndex
+	var savedIdxs [numSegments][]int
+	for seg := savedSegment; seg < numSegments; seg++ {
+		buckets := c.segments[seg]
+		if len(buckets) == 0 {
+			continue
+		}
+		idxs := make([]int, len(buckets))
+		for i, b := range buckets {
+			idxs[i] = b.idx
+		}
+		savedIdxs[seg] = idxs
+	}
+	return func() {
+		c.segmentIndex = savedSegment
+		for seg := savedSegment; seg < numSegments; seg++ {
+			for i, idx := range savedIdxs[seg] {
+				c.segments[seg][i].idx = idx
+			}
+		}
+	}
+}
+
+func (c *cacheCandidateIterator) peek(borrow bool) (bandMember, func(), bool) {
+	for c.segmentIndex < numSegments {
+		if b, variant, ok := c.peekFromSegment(c.segments[c.segmentIndex], borrow); ok {
+			return bandMember{
+				wl:          b.top(),
+				reason:      variant.PreemptionReason(),
+				segment:     c.segmentIndex,
+				cq:          b.cq,
+				lca:         b.lca,
+				isSameQueue: b.isSameQueue,
+			}, b.advance, true
+		}
+		c.segmentIndex++
+	}
+	return bandMember{}, nil, false
+}
+
+// peekFromSegment selects the bucket holding the current minimum eligible
+// candidate in a single segment, without advancing it.
 //
 // TODO: each pop costs O(K), where K is the number of candidate ClusterQueues, so
 // merging a segment is O(K×L) over its L candidates. Candidates are usually few, so
 // this simple scan is enough; if needed we may later heap or merge-sort the bucket
 // tops to lower the per-pop cost.
-func (c *cacheCandidateIterator) nextFromSegment(buckets []*bucket, borrow bool) (*workload.Info, preemptionVariant, bool) {
+func (c *cacheCandidateIterator) peekFromSegment(buckets []*bucket, borrow bool) (*bucket, preemptionVariant, bool) {
 	var bestBucket *bucket
 	var bestVariant preemptionVariant
 	for _, b := range buckets {
@@ -213,6 +299,16 @@ func (c *cacheCandidateIterator) nextFromSegment(buckets []*bucket, borrow bool)
 		}
 	}
 	if bestBucket == nil {
+		return nil, Never, false
+	}
+	return bestBucket, bestVariant, true
+}
+
+// nextFromSegment returns the next valid candidate from a single segment, merging
+// the segment's per-CQ buckets on the fly.
+func (c *cacheCandidateIterator) nextFromSegment(buckets []*bucket, borrow bool) (*workload.Info, preemptionVariant, bool) {
+	bestBucket, bestVariant, ok := c.peekFromSegment(buckets, borrow)
+	if !ok {
 		return nil, Never, false
 	}
 	wl := bestBucket.top()

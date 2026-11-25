@@ -17,6 +17,7 @@ limitations under the License.
 package classical
 
 import (
+	"iter"
 	"slices"
 	"sort"
 	"time"
@@ -41,11 +42,14 @@ type CandidateIterator interface {
 	NoCandidateForHierarchicalReclaim() bool
 	Reset()
 	Next(borrow bool) (*workload.Info, string)
+	Bands(borrow bool) iter.Seq[Band]
+	InProgressCandidates(borrow bool) iter.Seq2[*workload.Info, string]
 }
 
 type candidateIterator struct {
 	candidates                        []*candidateElem
 	runIndex                          int
+	enabledAfs                        bool
 	frsNeedPreemption                 sets.Set[resources.FlavorResource]
 	snapshot                          *schdcache.Snapshot
 	noCandidateFromOtherQueues        bool
@@ -62,7 +66,8 @@ func (c *candidateIterator) NoCandidateForHierarchicalReclaim() bool {
 }
 
 type candidateElem struct {
-	wl *workload.Info
+	segment int
+	wl      *workload.Info
 	// lca of this queue and cq (queue to which the new workload is submitted)
 	lca *schdcache.CohortSnapshot
 	// candidates above priority threshold cannot be preempted if at the same time
@@ -132,14 +137,22 @@ func newCandidateIterator(
 	evictedSTCandidates, nonEvictedSTCandidates := splitEvicted(priorityCandidates)
 	evictedSameQueueCandidates, nonEvictedSameQueueCandidates := splitEvicted(sameQueueCandidates)
 	allCandidates := make([]*candidateElem, 0, len(hierarchyCandidates)+len(priorityCandidates)+len(sameQueueCandidates))
-	allCandidates = append(allCandidates, evictedHierarchicalReclaimCandidates...)
-	allCandidates = append(allCandidates, evictedSTCandidates...)
-	allCandidates = append(allCandidates, evictedSameQueueCandidates...)
-	allCandidates = append(allCandidates, nonEvictedHierarchicalReclaimCandidates...)
-	allCandidates = append(allCandidates, nonEvictedSTCandidates...)
-	allCandidates = append(allCandidates, nonEvictedSameQueueCandidates...)
+	for segment, elems := range [numSegments][]*candidateElem{
+		evictedHierarchicalReclaimCandidates,
+		evictedSTCandidates,
+		evictedSameQueueCandidates,
+		nonEvictedHierarchicalReclaimCandidates,
+		nonEvictedSTCandidates,
+		nonEvictedSameQueueCandidates,
+	} {
+		for _, elem := range elems {
+			elem.segment = segment
+		}
+		allCandidates = append(allCandidates, elems...)
+	}
 	return &candidateIterator{
 		runIndex:                          0,
+		enabledAfs:                        enabledAfs,
 		frsNeedPreemption:                 frsNeedPreemption,
 		snapshot:                          snapshot,
 		candidates:                        allCandidates,
@@ -147,6 +160,62 @@ func newCandidateIterator(
 		noCandidateForHierarchicalReclaim: len(hierarchyCandidates) == 0,
 		hierarchicalReclaimCtx:            hierarchicalReclaimCtx,
 	}
+}
+
+func (c *candidateIterator) Bands(borrow bool) iter.Seq[Band] {
+	return iterBands(c, c.hierarchicalReclaimCtx.Log, c.enabledAfs, c.frsNeedPreemption, borrow)
+}
+
+func (c *candidateIterator) InProgressCandidates(borrow bool) iter.Seq2[*workload.Info, string] {
+	return func(yield func(*workload.Info, string) bool) {
+		for _, elem := range c.candidates {
+			if !hasInProgressPreemption(elem.wl.Obj) {
+				continue
+			}
+			if !c.candidateIsValid(elem, borrow) {
+				continue
+			}
+			cq := c.snapshot.ClusterQueue(elem.wl.ClusterQueue)
+			if _, inSnapshot := cq.Workloads[workload.Key(elem.wl.Obj)]; !inSnapshot {
+				continue
+			}
+			if !yield(elem.wl, elem.preemptionVariant.PreemptionReason()) {
+				return
+			}
+		}
+	}
+}
+
+func (c *candidateIterator) save() func() {
+	savedRunIndex := c.runIndex
+	return func() {
+		c.runIndex = savedRunIndex
+	}
+}
+
+func (c *candidateIterator) peek(borrow bool) (bandMember, func(), bool) {
+	for c.runIndex < len(c.candidates) {
+		elem := c.candidates[c.runIndex]
+		if c.candidateIsValid(elem, borrow) {
+			cq := c.snapshot.ClusterQueue(elem.wl.ClusterQueue)
+			if _, inSnapshot := cq.Workloads[workload.Key(elem.wl.Obj)]; inSnapshot {
+				return bandMember{
+					wl:          elem.wl,
+					reason:      elem.preemptionVariant.PreemptionReason(),
+					segment:     elem.segment,
+					cq:          cq,
+					lca:         elem.lca,
+					isSameQueue: cq == c.hierarchicalReclaimCtx.Cq,
+				}, c.advance, true
+			}
+		}
+		c.runIndex++
+	}
+	return bandMember{}, nil, false
+}
+
+func (c *candidateIterator) advance() {
+	c.runIndex++
 }
 
 // Next allows to iterate over the ordered sequence of candidates, with the reason

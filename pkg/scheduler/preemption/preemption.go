@@ -81,12 +81,38 @@ type Preemptor struct {
 	retryAt *time.Time
 }
 
+// candidateBand represents one live equivalence tier of preemption candidates.
+// Within a band, partial preemption shrinks shrinkCandidates first and, if the
+// workload still does not fit, escalates to whole eviction using
+// evictCandidates. Both iterators remove yielded candidates from the snapshot
+// via policy.YieldFromSnapshot.
+type candidateBand struct {
+	shrinkCandidates iter.Seq[*Target]
+	evictCandidates  iter.Seq[*Target]
+	// isEligible, when non-nil, re-checks whether a previously observed peer is
+	// still eligible against the current snapshot (for example, its ClusterQueue
+	// has not dropped back within nominal quota).
+	isEligible func(*Target) bool
+	// eligibilityScope, set together with isEligible, groups the peers whose
+	// eligibility depends on the same usage: evicting or shrinking a peer can
+	// change the eligibility of the peers of its scope only. It returns nil
+	// for a peer that is eligible whatever the usage.
+	eligibilityScope func(*Target) any
+}
+
 // PreemptionStrategy represents a singular set of ordered potential preemption candidates.
 // One strategy maps to a single, isolated attempt at finding a possible preemption result.
 type PreemptionStrategy struct {
 	// candidates is a dynamic iterator over preemption candidates
 	// in order of decreasig preemption appeal.
 	candidates iter.Seq[*Target]
+	// bands, when non-nil, yields live equivalence tiers of preemption
+	// candidates. When nil, candidateBands wraps candidates as a single band.
+	bands iter.Seq[candidateBand]
+	// inProgressCandidates, when non-nil, yields eligible candidates that
+	// already have an eviction or shrink in progress, so that a search over
+	// several bands counts them before it disrupts any band.
+	inProgressCandidates iter.Seq[*Target]
 	// allowBorrowing determines wheteher borrowing is enabled in the scope of this strategy.
 	allowBorrowing bool
 	// pCtx represents the active preemption context.
@@ -111,6 +137,18 @@ func withVerify(verify func(targets []*Target) (bool, string)) strategyOption {
 	}
 }
 
+func withBands(bands iter.Seq[candidateBand]) strategyOption {
+	return func(ps *PreemptionStrategy) {
+		ps.bands = bands
+	}
+}
+
+func withInProgressCandidates(candidates iter.Seq[*Target]) strategyOption {
+	return func(ps *PreemptionStrategy) {
+		ps.inProgressCandidates = candidates
+	}
+}
+
 func newPreemptionStrategy(
 	candidates iter.Seq[*Target],
 	allowBorrowing bool,
@@ -128,6 +166,20 @@ func newPreemptionStrategy(
 	}
 
 	return ps
+}
+
+// candidateBands returns a lazy sequence of live candidate bands for this strategy.
+// Strategies without explicit banding yield all candidates as one band.
+func (ps *PreemptionStrategy) candidateBands() iter.Seq[candidateBand] {
+	if ps.bands != nil {
+		return ps.bands
+	}
+	return func(yield func(candidateBand) bool) {
+		yield(candidateBand{
+			shrinkCandidates: ps.candidates,
+			evictCandidates:  ps.candidates,
+		})
+	}
 }
 
 // Candidates returns a lazy sequence of candidate workload keys for this strategy.
@@ -568,8 +620,11 @@ func (p *Preemptor) getTargets(ctx context.Context, strategies iter.Seq[Preempti
 // searchTargets restores the snapshot before returning. A nil plan uses the
 // original whole-eviction algorithm.
 func (ps *PreemptionStrategy) searchTargets(ctx context.Context, plan *partialPlan) []*Target {
-	if planned := plan.shrinkPass(ctx); planned != nil {
-		return planned
+	if plan != nil {
+		targets, fallback := plan.search(ctx)
+		if targets != nil || !fallback {
+			return targets
+		}
 	}
 	var targets []*Target
 	for candidate := range ps.candidates {
@@ -577,11 +632,7 @@ func (ps *PreemptionStrategy) searchTargets(ctx context.Context, plan *partialPl
 		if !workloadFits(ctx, ps.pCtx, ps.allowBorrowing) {
 			continue
 		}
-		walked := plan.walkOrder(targets)
 		targets = fillBackWorkloads(ctx, ps.pCtx, targets, ps.allowBorrowing)
-		if planned := plan.evictionPass(ctx, walked); planned != nil {
-			return planned
-		}
 		if !ps.accepts(ctx, targets) {
 			break
 		}

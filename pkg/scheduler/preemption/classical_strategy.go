@@ -28,11 +28,6 @@ import (
 	"sigs.k8s.io/kueue/pkg/workload"
 )
 
-type candidateIterator interface {
-	Reset()
-	Next(borrow bool) (candidate *workload.Info, evictReason string)
-}
-
 // classicalPreemptionStrategy implements a heuristic to find a minimal set of Workloads
 // to preempt.
 // The heuristic first removes candidates, in the input order, while their
@@ -88,15 +83,77 @@ func classicalPreemptionStrategy(ctx context.Context, preemptor *Preemptor, pree
 			candidateIter := func(yieldCandidate func(*Target) bool) {
 				cont := iterateOverCandidates(ctx, preemptionCtx, candidatesGenerator, allowBorrowing, yieldCandidate)
 				if cont && features.Enabled(features.ConfigurablePreemptions) {
-					preemptionCtx.configurableEvaluator.FindCandidates(
-						preemptionCtx.snapshot,
-						preemptionCtx.frsNeedPreemption,
-						func() bool { return workloadQuotaFits(preemptionCtx, allowBorrowing) },
-						yieldCandidate,
-					)
+					configurableCandidates(preemptionCtx, allowBorrowing)(yieldCandidate)
 				}
 			}
-			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx)) {
+			var strategyOpts []strategyOption
+			if features.Enabled(features.PartialPreemptionPriorityOrder) {
+				strategyOpts = append(
+					strategyOpts,
+					withBands(classicalBands(preemptionCtx, candidatesGenerator, allowBorrowing)),
+					withInProgressCandidates(targetsFromClassical(preemptionCtx, candidatesGenerator.InProgressCandidates(allowBorrowing))),
+				)
+			}
+			if !yieldStrategy(newPreemptionStrategy(candidateIter, allowBorrowing, preemptionCtx, strategyOpts...)) {
+				return
+			}
+		}
+	}
+}
+
+func classicalBands(
+	preemptionCtx *preemptionCtx,
+	candidatesGenerator classical.CandidateIterator,
+	allowBorrowing bool,
+) iter.Seq[candidateBand] {
+	return func(yieldBand func(candidateBand) bool) {
+		for rawBand := range candidatesGenerator.Bands(allowBorrowing) {
+			candidates := targetsFromClassical(preemptionCtx, rawBand.Candidates)
+			band := candidateBand{
+				shrinkCandidates: candidates,
+				evictCandidates:  candidates,
+				isEligible: func(t *Target) bool {
+					return rawBand.IsEligible(t.WorkloadInfo)
+				},
+				eligibilityScope: func(t *Target) any {
+					return rawBand.EligibilityScope(t.WorkloadInfo)
+				},
+			}
+			if !yieldBand(band) {
+				return
+			}
+		}
+		if features.Enabled(features.ConfigurablePreemptions) && preemptionCtx.configurableEvaluator.HasRules() {
+			// Victims selected by PreemptionConfig rules are evicted whole,
+			// so they form a trailing eviction-only band.
+			yieldBand(candidateBand{evictCandidates: configurableCandidates(preemptionCtx, allowBorrowing)})
+		}
+	}
+}
+
+// configurableCandidates yields the victims that the PreemptionConfig rules
+// select in the current snapshot, removing each of them from the snapshot.
+func configurableCandidates(preemptionCtx *preemptionCtx, allowBorrowing bool) iter.Seq[*Target] {
+	return func(yield func(*Target) bool) {
+		preemptionCtx.configurableEvaluator.FindCandidates(
+			preemptionCtx.snapshot,
+			preemptionCtx.frsNeedPreemption,
+			func() bool { return workloadQuotaFits(preemptionCtx, allowBorrowing) },
+			yield,
+		)
+	}
+}
+
+func targetsFromClassical(preemptionCtx *preemptionCtx, seq iter.Seq2[*workload.Info, string]) iter.Seq[*Target] {
+	return func(yield func(*Target) bool) {
+		yield = policy.YieldFromSnapshot(preemptionCtx.snapshot, yield)
+		for wl, reason := range seq {
+			candidate := &Target{
+				WorkloadInfo: wl,
+				Reason:       reason,
+				WorkloadCq:   preemptionCtx.snapshot.ClusterQueue(wl.ClusterQueue),
+			}
+			if !yield(candidate) {
 				return
 			}
 		}
@@ -106,7 +163,7 @@ func classicalPreemptionStrategy(ctx context.Context, preemptor *Preemptor, pree
 func iterateOverCandidates(
 	ctx context.Context,
 	preemptionCtx *preemptionCtx,
-	iterator candidateIterator,
+	iterator classical.CandidateIterator,
 	allowBorrowing bool,
 	yield func(*Target) bool,
 ) (cont bool) {

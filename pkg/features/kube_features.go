@@ -1058,6 +1058,15 @@ const (
 	// workload tolerates downscaling.
 	PartialPreemption featuregate.Feature = "PartialPreemption"
 
+	// owner: @zhengchenyu
+	// issue: https://github.com/kubernetes-sigs/kueue/issues/975
+	//
+	// PartialPreemptionPriorityOrder makes classical partial preemption process victims band
+	// by band (grouped by segment, effective priority, and per-ClusterQueue AdmissionFairSharing
+	// usage tier), counting reductions that are already in progress first and restoring unneeded
+	// disruption in reverse band order. When disabled, all candidates form a single band.
+	PartialPreemptionPriorityOrder featuregate.Feature = "PartialPreemptionPriorityOrder"
+
 	// owner: @jigisha620
 	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/5133-capacity-buffer-support
 	//
@@ -1153,6 +1162,7 @@ var defaultFeatureGateDependencies = map[featuregate.Feature][]featuregate.Featu
 	KueueDRAExcludeDeviceClasses:                        {KueueDRAIntegration},
 	ConfigurablePreemptionLimits:                        {ConfigurablePreemptions},
 	FairSharingPreemptWithinClusterQueueFallback:        {FairSharingVerifyFinalTargets},
+	PartialPreemptionPriorityOrder:                      {PartialPreemption},
 }
 
 // defaultVersionedFeatureGates consists of all known Kueue-specific feature keys.
@@ -1673,6 +1683,10 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 
 	PartialPreemption: {
+		{Version: version.MustParse("0.21"), Default: false, PreRelease: featuregate.Alpha},
+	},
+
+	PartialPreemptionPriorityOrder: {
 		{Version: version.MustParse("0.21"), Default: false, PreRelease: featuregate.Alpha},
 	},
 
