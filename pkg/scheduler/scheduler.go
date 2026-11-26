@@ -602,14 +602,10 @@ func (s *Scheduler) processEntry(
 			e.inadmissibleMsg = "Workload will fit after the ResourceClaim controller deallocates the devices of Pods that are gone"
 		case e.assignment.WaitingForResidualTASPods:
 			e.inadmissibleMsg = "Workload will fit after bound Pods from released TAS reservations terminate or are deleted"
-		case e.waitingForOverlappingPreemptions:
-			e.inadmissibleMsg = "Workload has overlapping preemption targets with another workload, but will fit after these preemptions complete"
-			// Retry every flavor after overlapping preemptions change the cluster
-			// state. Residual waits retain progress to explore alternate flavors.
-			e.FlavorScanState = nil
 		default:
-			// Keep inadmissibleMsg set by the caller (e.g. PreemptionLimits recompute)
-			// and retry every flavor after earlier preemptions change the cluster state.
+			// Keep inadmissibleMsg set where the Fit was deferred, and retry every
+			// flavor after the awaited preemptions change the cluster state.
+			// Residual waits retain progress to explore alternate flavors.
 			e.FlavorScanState = nil
 		}
 		e.quotaReservedReason = kueue.WorkloadQuotaReservedReasonWaitingForPreemptedWorkloads
@@ -872,9 +868,6 @@ type entry struct {
 	clusterQueueSnapshot *schdcache.ClusterQueueSnapshot
 	quotaReservedReason  string
 	skipStatusUpdate     bool
-	// waitingForOverlappingPreemptions marks an entry deferred because its
-	// recomputed assignment relies on earlier overlapping preemptions completing.
-	waitingForOverlappingPreemptions bool
 	// refilled marks an entry popped mid-cycle rather than nominated as a
 	// ClusterQueue head; such entries are admitted only on Fit.
 	refilled bool
@@ -1043,11 +1036,12 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 		return false, nil
 	}
 
+	targetsOverlap := preemptedWorkloads.HasAny(e.preemptionTargets)
 	needsTASRecompute := fitsCheck == schdcache.FitsCheckNoTAS && features.Enabled(features.TASRecomputeAssignmentWithinSchedulingCycle)
-	needsOverlapRecompute := preemptedWorkloads.HasAny(e.preemptionTargets) && features.Enabled(features.RecomputeAssignmentUponPreemptionTargetsOverlap)
+	needsOverlapRecompute := targetsOverlap && features.Enabled(features.RecomputeAssignmentUponPreemptionTargetsOverlap)
 	// Overlapping targets stay on the overlap path to preserve flavor stickiness.
 	needsLimitsRecompute := features.Enabled(features.ConfigurablePreemptionLimits) &&
-		!preemptedWorkloads.HasAny(e.preemptionTargets) && !s.preemptor.WithinPreemptionLimits(e.preemptionTargets)
+		!targetsOverlap && !s.preemptor.WithinPreemptionLimits(e.preemptionTargets)
 
 	var revertRemoval func()
 	switch {
@@ -1100,7 +1094,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 	}
 	if needsOverlapRecompute && e.assignment.RepresentativeMode() == flavorassigner.Fit {
 		e.assignment.SetRepresentativeMode(flavorassigner.DeferredFit)
-		e.waitingForOverlappingPreemptions = true
+		e.inadmissibleMsg = "Workload has overlapping preemption targets with another workload, but will fit after these preemptions complete"
 	}
 	if needsLimitsRecompute {
 		// The recomputed Fit assumed earlier preemptions completed. Defer it unless the
@@ -1112,7 +1106,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 		}
 	}
 	fitsCheck = e.checkFitsWithDevices(ctx, log, snapshot, cq, preemptedWorkloads)
-	log.V(3).Info("Re-computed assignment", "newMode", result.assignment.RepresentativeMode(), "fitsCheck", fitsCheck)
+	log.V(3).Info("Re-computed assignment", "newMode", e.assignment.RepresentativeMode(), "fitsCheck", fitsCheck)
 
 	// Determine the overlap recomputation result for metrics reporting.
 	if needsOverlapRecompute {
@@ -1120,7 +1114,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 		switch {
 		case e.assignment.RepresentativeMode() == flavorassigner.DeferredFit:
 			overlapRecomputeResult = metrics.PreemptionTargetRecomputationResultDeferredFit
-		case len(result.targets) > 0 && fitsCheck == schdcache.FitsCheckOk && !preemptedWorkloads.HasAny(result.targets):
+		case len(e.preemptionTargets) > 0 && fitsCheck == schdcache.FitsCheckOk && !preemptedWorkloads.HasAny(e.preemptionTargets):
 			overlapRecomputeResult = metrics.PreemptionTargetRecomputationResultNewTargets
 		default:
 			overlapRecomputeResult = metrics.PreemptionTargetRecomputationResultSkipped
